@@ -1,53 +1,66 @@
 package main
 
+// Import necessary packages
 import (
-	"encoding/json"
-	"fmt"
-	"gator-swamp/internal/config"
-	"gator-swamp/internal/engine"
-	"gator-swamp/internal/utils"
-	"log"
-	"net/http"
-	"time"
+	"encoding/json"               // JSON encoding and decoding
+	"fmt"                         // String formatting
+	"gator-swamp/internal/config" // Configuration handling
+	"gator-swamp/internal/engine" // Engine for managing actors
+	"gator-swamp/internal/utils"  // Utility functions and metrics
+	"log"                         // Logging
+	"net/http"                    // HTTP server
+	"time"                        // Time utilities
 
-	"github.com/asynkron/protoactor-go/actor"
-	"github.com/google/uuid"
+	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
+	"github.com/google/uuid"                  // UUID generation for unique identifiers
 )
 
-// Request structs for JSON handling
+// Request structs for handling JSON input
+
+// CreateSubredditRequest represents a request to create a new subreddit
 type CreateSubredditRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	CreatorID   string `json:"creatorId"`
+	Name        string `json:"name"`        // Subreddit name
+	Description string `json:"description"` // Subreddit description
+	CreatorID   string `json:"creatorId"`   // Creator ID (UUID as string)
 }
 
+// CreatePostRequest represents a request to create a new post
 type CreatePostRequest struct {
-	Title       string `json:"title"`
-	Content     string `json:"content"`
-	AuthorID    string `json:"authorId"`
-	SubredditID string `json:"subredditId"`
+	Title       string `json:"title"`       // Post title
+	Content     string `json:"content"`     // Post content
+	AuthorID    string `json:"authorId"`    // Author ID (UUID as string)
+	SubredditID string `json:"subredditId"` // Subreddit ID (UUID as string)
 }
 
-// Server holds all dependencies
+// SubredditResponse is a response struct representing a subreddit with relevant details
+type SubredditResponse struct {
+	ID          string    `json:"id"`          // Subreddit ID
+	Name        string    `json:"name"`        // Subreddit name
+	Description string    `json:"description"` // Subreddit description
+	Members     int       `json:"members"`     // Number of members
+	CreatedAt   time.Time `json:"createdAt"`   // Timestamp of creation
+}
+
+// Server holds all server dependencies, including the actor system and engine
 type Server struct {
-	system  *actor.ActorSystem
-	context *actor.RootContext
-	engine  *engine.Engine
-	metrics *utils.MetricsCollector
+	system  *actor.ActorSystem      // Actor system
+	context *actor.RootContext      // Root context for actors
+	engine  *engine.Engine          // Engine managing actors
+	metrics *utils.MetricsCollector // Metrics collector
 }
 
 func main() {
-	// Initialize components
-	cfg := config.DefaultConfig()
-	metrics := utils.NewMetricsCollector()
+	// Initialize application components
+	cfg := config.DefaultConfig()          // Load default configurations
+	metrics := utils.NewMetricsCollector() // Initialize metrics collector
 
-	// Initialize actor system
+	// Initialize the ProtoActor system
 	system := actor.NewActorSystem()
 
-	// Initialize engine with actors
+	// Initialize the engine with actors
 	gatorEngine := engine.NewEngine(system, metrics)
 
-	// Create server instance
+	// Create the server instance with all dependencies
 	server := &Server{
 		system:  system,
 		context: system.Root,
@@ -55,12 +68,13 @@ func main() {
 		metrics: metrics,
 	}
 
-	// Set up HTTP handlers
-	http.HandleFunc("/health", server.handleHealth)
-	http.HandleFunc("/subreddit", server.handleSubreddit)
-	http.HandleFunc("/post", server.handlePost)
+	// Set up HTTP endpoints
+	http.HandleFunc("/health", server.handleHealth())                      // Health check endpoint
+	http.HandleFunc("/subreddit", server.handleSubreddits())               // Endpoint for subreddit-related operations
+	http.HandleFunc("/subreddit/members", server.handleSubredditMembers()) // Endpoint for subreddit members
+	http.HandleFunc("/post", server.handlePost())                          // Endpoint for post-related operations
 
-	// Start server
+	// Start the HTTP server
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
 	if err := http.ListenAndServe(serverAddr, nil); err != nil {
@@ -68,140 +82,167 @@ func main() {
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	// Get subreddit count
-	futureSubreddits := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.GetCountsMsg{}, 5*time.Second)
-	subredditResult, err := futureSubreddits.Result()
-	if err != nil {
-		http.Error(w, "Failed to get subreddit count", http.StatusInternalServerError)
-		return
+// handleHealth checks the health of the system
+func (s *Server) handleHealth() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get the subreddit count from SubredditActor
+		futureSubreddits := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.GetCountsMsg{}, 5*time.Second)
+		subredditResult, err := futureSubreddits.Result()
+		if err != nil {
+			http.Error(w, "Failed to get subreddit count", http.StatusInternalServerError)
+			return
+		}
+		subredditCount := subredditResult.(int) // Parse the result
+
+		// Get the post count from PostActor
+		futurePosts := s.context.RequestFuture(s.engine.GetPostActor(), &engine.GetCountsMsg{}, 5*time.Second)
+		postResult, err := futurePosts.Result()
+		if err != nil {
+			http.Error(w, "Failed to get post count", http.StatusInternalServerError)
+			return
+		}
+		postCount := postResult.(int) // Parse the result
+
+		// Respond with the subreddit and post counts
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":          "healthy",
+			"subreddit_count": subredditCount,
+			"post_count":      postCount,
+		})
 	}
-	subredditCount := subredditResult.(int)
-
-	// Get post count
-	futurePosts := s.context.RequestFuture(s.engine.GetPostActor(), &engine.GetCountsMsg{}, 5*time.Second)
-	postsResult, err := futurePosts.Result()
-	if err != nil {
-		http.Error(w, "Failed to get post count", http.StatusInternalServerError)
-		return
-	}
-	postCount := postsResult.(int)
-
-	response := fmt.Sprintf("GatorSwap Status:\n"+
-		"- Total Subreddits: %d\n"+
-		"- Total Posts: %d\n",
-		subredditCount,
-		postCount,
-	)
-
-	fmt.Fprint(w, response)
 }
 
-func (s *Server) handleSubreddit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// handleSubreddits handles requests related to subreddits, such as listing all subreddits or creating a new one
+func (s *Server) handleSubreddits() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// Handle listing all subreddits
+			future := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.ListSubredditsMsg{}, 5*time.Second)
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to get subreddits", http.StatusInternalServerError)
+				return
+			}
 
-	var req CreateSubredditRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
-		return
-	}
+			// Respond with the list of subreddits
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
 
-	// Validate request
-	if req.Name == "" {
-		http.Error(w, "Name is required", http.StatusBadRequest)
-		return
-	}
+		case http.MethodPost:
+			// Handle creating a new subreddit
+			var req CreateSubredditRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
 
-	// Convert string ID to UUID
-	creatorID, err := uuid.Parse(req.CreatorID)
-	if err != nil {
-		http.Error(w, "Invalid creatorId format", http.StatusBadRequest)
-		return
-	}
+			// Convert CreatorID to UUID and create subreddit message
+			creatorID, err := uuid.Parse(req.CreatorID)
+			if err != nil {
+				http.Error(w, "Invalid creator ID format", http.StatusBadRequest)
+				return
+			}
+			future := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.CreateSubredditMsg{
+				Name:        req.Name,
+				Description: req.Description,
+				CreatorID:   creatorID,
+			}, 5*time.Second)
 
-	// Create message
-	createMsg := &engine.CreateSubredditMsg{
-		Name:        req.Name,
-		Description: req.Description,
-		CreatorID:   creatorID,
-	}
+			// Handle the response from the actor
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to create subreddit", http.StatusInternalServerError)
+				return
+			}
 
-	// Send to actor
-	future := s.context.RequestFuture(s.engine.GetSubredditActor(), createMsg, 5*time.Second)
-	result, err := future.Result()
-	if err != nil {
-		http.Error(w, "Failed to create subreddit", http.StatusInternalServerError)
-		return
-	}
+			// Respond with the created subreddit details
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
 
-	// Check for application error
-	if appErr, ok := result.(*utils.AppError); ok {
-		http.Error(w, appErr.Message, http.StatusBadRequest)
-		return
+		default:
+			// Handle unsupported HTTP methods
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
-
-	// Send response
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
 }
 
-func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// handleSubredditMembers handles requests to retrieve the members of a specific subreddit
+func (s *Server) handleSubredditMembers() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get the subreddit ID from the query parameters
+		subredditID := r.URL.Query().Get("id")
+		if subredditID == "" {
+			http.Error(w, "Subreddit ID required", http.StatusBadRequest)
+			return
+		}
 
-	var req CreatePostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
-		return
-	}
+		// Convert subreddit ID to UUID
+		id, err := uuid.Parse(subredditID)
+		if err != nil {
+			http.Error(w, "Invalid subreddit ID", http.StatusBadRequest)
+			return
+		}
 
-	// Validate request
-	if req.Title == "" || req.Content == "" {
-		http.Error(w, "Title and content are required", http.StatusBadRequest)
-		return
-	}
+		// Create message to get subreddit members
+		msg := &engine.GetSubredditMembersMsg{SubredditID: id}
+		future := s.context.RequestFuture(s.engine.GetSubredditActor(), msg, 5*time.Second)
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to get members", http.StatusInternalServerError)
+			return
+		}
 
-	// Convert string IDs to UUIDs
-	authorID, err := uuid.Parse(req.AuthorID)
-	if err != nil {
-		http.Error(w, "Invalid authorId format", http.StatusBadRequest)
-		return
+		// Respond with the list of subreddit members
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
 	}
+}
 
-	subredditID, err := uuid.Parse(req.SubredditID)
-	if err != nil {
-		http.Error(w, "Invalid subredditId format", http.StatusBadRequest)
-		return
+// handlePost handles post-related requests, such as creating a new post
+func (s *Server) handlePost() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// Parse request to create a post
+			var req CreatePostRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
+
+			// Convert AuthorID and SubredditID to UUIDs and create post message
+			authorID, err := uuid.Parse(req.AuthorID)
+			if err != nil {
+				http.Error(w, "Invalid author ID format", http.StatusBadRequest)
+				return
+			}
+			subredditID, err := uuid.Parse(req.SubredditID)
+			if err != nil {
+				http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
+				return
+			}
+			future := s.context.RequestFuture(s.engine.GetPostActor(), &engine.CreatePostMsg{
+				Title:       req.Title,
+				Content:     req.Content,
+				AuthorID:    authorID,
+				SubredditID: subredditID,
+			}, 5*time.Second)
+
+			// Handle the response from the actor
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to create post", http.StatusInternalServerError)
+				return
+			}
+
+			// Respond with the created post details
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+
+		} else {
+			// Handle unsupported HTTP methods
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
-
-	// Create message
-	createMsg := &engine.CreatePostMsg{
-		Title:       req.Title,
-		Content:     req.Content,
-		AuthorID:    authorID,
-		SubredditID: subredditID,
-	}
-
-	// Send to actor
-	future := s.context.RequestFuture(s.engine.GetPostActor(), createMsg, 5*time.Second)
-	result, err := future.Result()
-	if err != nil {
-		http.Error(w, "Failed to create post", http.StatusInternalServerError)
-		return
-	}
-
-	// Check for application error
-	if appErr, ok := result.(*utils.AppError); ok {
-		http.Error(w, appErr.Message, http.StatusBadRequest)
-		return
-	}
-
-	// Send response
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
 }
