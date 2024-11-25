@@ -5,6 +5,7 @@ go 1.23.3
 require (
 	github.com/asynkron/protoactor-go v0.0.0-20240822202345-3c0e61ca19c9
 	github.com/google/uuid v1.6.0
+	golang.org/x/crypto v0.22.0
 )
 
 require (

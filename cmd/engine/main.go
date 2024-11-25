@@ -10,7 +10,7 @@ import (
 	"log"                         // Logging
 	"net/http"                    // HTTP server
 	"time"                        // Time utilities
-
+	"gator-swamp/internal/engine/actors"  // For UserActors
 	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
 	"github.com/google/uuid"                  // UUID generation for unique identifiers
 )
@@ -47,6 +47,25 @@ type Server struct {
 	context *actor.RootContext      // Root context for actors
 	engine  *engine.Engine          // Engine managing actors
 	metrics *utils.MetricsCollector // Metrics collector
+	userActor      *actor.PID        // User actor system
+}
+
+// User-related request structures
+type RegisterUserRequest struct {
+    Username string `json:"username"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+//User-related login
+type LoginRequest struct {
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+
+type LoginResponse struct {
+    Success bool   `json:"success"`
+    Token   string `json:"token,omitempty"`
+    Error   string `json:"error,omitempty"`
 }
 
 func main() {
@@ -60,6 +79,8 @@ func main() {
 	// Initialize the engine with actors
 	gatorEngine := engine.NewEngine(system, metrics)
 
+	
+
 	// Create the server instance with all dependencies
 	server := &Server{
 		system:  system,
@@ -68,12 +89,18 @@ func main() {
 		metrics: metrics,
 	}
 
+	 // Initialize user actor
+	 server.userActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
+        return actors.NewUserActor(nil)
+    }))
+
 	// Set up HTTP endpoints
 	http.HandleFunc("/health", server.handleHealth())                      // Health check endpoint
 	http.HandleFunc("/subreddit", server.handleSubreddits())               // Endpoint for subreddit-related operations
 	http.HandleFunc("/subreddit/members", server.handleSubredditMembers()) // Endpoint for subreddit members
 	http.HandleFunc("/post", server.handlePost())                          // Endpoint for post-related operations
-
+    http.HandleFunc("/user/register", server.handleUserRegistration())     // Endpoint for register
+    http.HandleFunc("/user/login", server.handleUserLogin())               //Endpoint for login
 	// Start the HTTP server
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
@@ -245,4 +272,63 @@ func (s *Server) handlePost() http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}
+}
+//Handler for registration
+func (s *Server) handleUserRegistration() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+        var req RegisterUserRequest
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        future := s.context.RequestFuture(s.userActor, &actors.RegisterUserMsg{
+            Username: req.Username,
+            Email:    req.Email,
+            Password: req.Password,
+        }, 5*time.Second)
+
+        result, err := future.Result()
+        if err != nil {
+            http.Error(w, "Failed to register user", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(result)
+    }
+}
+//Handler for login
+func (s *Server) handleUserLogin() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+        var req LoginRequest
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        future := s.context.RequestFuture(s.userActor, &actors.LoginMsg{
+            Email:    req.Email,
+            Password: req.Password,
+        }, 5*time.Second)
+
+        result, err := future.Result()
+        if err != nil {
+            http.Error(w, "Failed to process login", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(result)
+    }
 }
