@@ -26,6 +26,10 @@ type (
         AuthorID  uuid.UUID `json:"authorId"` // To verify ownership
     }
 
+	cascadeDeleteMsg struct {
+        commentID uuid.UUID
+    }
+
     GetCommentMsg struct {
         CommentID uuid.UUID `json:"commentId"`
     }
@@ -61,6 +65,23 @@ func NewCommentActor() *CommentActor {
     }
 }
 
+func (a *CommentActor) deleteCommentAndChildren(commentID uuid.UUID) {
+    if comment, exists := a.comments[commentID]; exists {
+        // Mark this comment as deleted
+        comment.IsDeleted = true
+        comment.Content = "[deleted]"
+        comment.UpdatedAt = time.Now()
+
+        // Store original children before recursion
+        childrenToDelete := make([]uuid.UUID, len(comment.Children))
+        copy(childrenToDelete, comment.Children)
+
+        // Recursively delete all child comments
+        for _, childID := range childrenToDelete {
+            a.deleteCommentAndChildren(childID)
+        }
+    }
+}
 func (a *CommentActor) Receive(context actor.Context) {
     switch msg := context.Message().(type) {
     case *CreateCommentMsg:
@@ -92,6 +113,19 @@ func (a *CommentActor) Receive(context actor.Context) {
         
         context.Respond(comment)
 
+    case *DeleteCommentMsg:
+        if comment, exists := a.comments[msg.CommentID]; exists {
+            if comment.AuthorID == msg.AuthorID {
+                // Use cascade deletion instead of simple deletion
+                a.deleteCommentAndChildren(msg.CommentID)
+                context.Respond(true)
+            } else {
+                context.Respond(false)
+            }
+        } else {
+            context.Respond(false)
+        }
+
     case *EditCommentMsg:
         if comment, exists := a.comments[msg.CommentID]; exists {
             if comment.AuthorID == msg.AuthorID && !comment.IsDeleted {
@@ -104,21 +138,7 @@ func (a *CommentActor) Receive(context actor.Context) {
         } else {
             context.Respond(nil)
         }
-
-    case *DeleteCommentMsg:
-        if comment, exists := a.comments[msg.CommentID]; exists {
-            if comment.AuthorID == msg.AuthorID {
-                comment.IsDeleted = true
-                comment.Content = "[deleted]"
-                comment.UpdatedAt = time.Now()
-                context.Respond(true)
-            } else {
-                context.Respond(false)
-            }
-        } else {
-            context.Respond(false)
-        }
-
+	
     case *GetCommentMsg:
         if comment, exists := a.comments[msg.CommentID]; exists {
             context.Respond(comment)

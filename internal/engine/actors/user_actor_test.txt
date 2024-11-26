@@ -1,0 +1,93 @@
+package actors
+
+import (
+    "testing"
+    "time"
+    "github.com/stretchr/testify/assert"
+    "github.com/asynkron/protoactor-go/actor"
+    "github.com/google/uuid"
+)
+
+func TestUserSupervisor(t *testing.T) {
+    system := actor.NewActorSystem()
+    
+    // Create supervisor
+    props := actor.PropsFromProducer(func() actor.Actor {
+        return NewUserSupervisor()
+    })
+    supervisor := system.Root.Spawn(props)
+
+    // Test registration
+    regMsg := &RegisterUserMsg{
+        Username: "testuser",
+        Email:    "test@example.com",
+        Password: "password123",
+        Karma:    100,
+    }
+
+    future := system.Root.RequestFuture(supervisor, regMsg, 5*time.Second)
+    result, err := future.Result()
+    assert.NoError(t, err)
+
+    userState, ok := result.(*UserState)
+    assert.True(t, ok)
+    assert.Equal(t, "testuser", userState.Username)
+    assert.Equal(t, 300, userState.Karma) // Initial karma value
+
+    // Test duplicate registration
+    future = system.Root.RequestFuture(supervisor, regMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    appErr, ok := result.(*utils.AppError)
+    assert.True(t, ok)
+    assert.Equal(t, utils.ErrDuplicate, appErr.Code)
+
+    // Test login
+    loginMsg := &LoginMsg{
+        Email:    "test@example.com",
+        Password: "password123",
+    }
+    future = system.Root.RequestFuture(supervisor, loginMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    loginResponse, ok := result.(*LoginResponse)
+    assert.True(t, ok)
+    assert.True(t, loginResponse.Success)
+    assert.NotEmpty(t, loginResponse.Token)
+}
+
+func TestUserProfile(t *testing.T) {
+    system := actor.NewActorSystem()
+    userID := uuid.New()
+    regMsg := &RegisterUserMsg{
+        Username: "testuser",
+        Email:    "test@example.com",
+        Password: "password123",
+        Karma:    100,
+    }
+
+    props := actor.PropsFromProducer(func() actor.Actor {
+        return NewUserActor(userID, regMsg)
+    })
+    pid := system.Root.Spawn(props)
+
+    // Test profile retrieval
+    profileMsg := &GetUserProfileMsg{
+        UserID: userID,
+    }
+    future := system.Root.RequestFuture(pid, profileMsg, 5*time.Second)
+    result, err := future.Result()
+    assert.NoError(t, err)
+    profile := result.(*UserState)
+    assert.Equal(t, "testuser", profile.Username)
+    assert.Equal(t, 300, profile.Karma)
+
+    // Test invalid profile retrieval
+    invalidProfileMsg := &GetUserProfileMsg{
+        UserID: uuid.New(), // Different user ID
+    }
+    future = system.Root.RequestFuture(pid, invalidProfileMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    assert.Nil(t, result, "Should return nil for invalid user ID")
+}

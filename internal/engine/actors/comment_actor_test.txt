@@ -1,0 +1,131 @@
+package actors
+
+import (
+    "testing"
+    "time"
+    "github.com/google/uuid"
+    "github.com/stretchr/testify/assert"
+    "github.com/asynkron/protoactor-go/actor"
+)
+
+func TestCommentCreationAndDeletion(t *testing.T) {
+    system := actor.NewActorSystem()
+    props := actor.PropsFromProducer(func() actor.Actor {
+        return NewCommentActor()
+    })
+    
+    pid := system.Root.Spawn(props)
+
+    // Create test data
+    user1ID := uuid.New()
+    user2ID := uuid.New()
+    postID := uuid.New()
+
+    // Test 1: Create parent comment
+    parentMsg := &CreateCommentMsg{
+        Content:  "Parent comment",
+        AuthorID: user1ID,
+        PostID:   postID,
+    }
+    future := system.Root.RequestFuture(pid, parentMsg, 5*time.Second)
+    result, err := future.Result()
+    assert.NoError(t, err)
+    parentComment := result.(*Comment)
+    assert.Equal(t, "Parent comment", parentComment.Content)
+    assert.Equal(t, user1ID, parentComment.AuthorID)
+
+    // Test 2: Create child comment
+    childMsg := &CreateCommentMsg{
+        Content:   "Child comment",
+        AuthorID:  user2ID,
+        PostID:    postID,
+        ParentID:  &parentComment.ID,
+    }
+    future = system.Root.RequestFuture(pid, childMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    childComment := result.(*Comment)
+    assert.Equal(t, &parentComment.ID, childComment.ParentID)
+
+    // Test 3: Verify comments exist
+    getMsg := &GetCommentsForPostMsg{
+        PostID: postID,
+    }
+    future = system.Root.RequestFuture(pid, getMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    comments := result.([]*Comment)
+    assert.Equal(t, 2, len(comments), "Should have both comments")
+
+    // Test 4: Try unauthorized deletion
+    unauthorizedDelete := &DeleteCommentMsg{
+        CommentID: parentComment.ID,
+        AuthorID:  user2ID, // Wrong user
+    }
+    future = system.Root.RequestFuture(pid, unauthorizedDelete, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    assert.False(t, result.(bool), "Unauthorized deletion should fail")
+
+    // Test 5: Authorized deletion with cascade
+    authorizedDelete := &DeleteCommentMsg{
+        CommentID: parentComment.ID,
+        AuthorID:  user1ID,
+    }
+    future = system.Root.RequestFuture(pid, authorizedDelete, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    assert.True(t, result.(bool), "Authorized deletion should succeed")
+
+    // Test 6: Verify all comments are deleted
+    future = system.Root.RequestFuture(pid, getMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    finalComments := result.([]*Comment)
+    assert.Equal(t, 0, len(finalComments), "All comments should be deleted")
+}
+
+func TestCommentEditing(t *testing.T) {
+    system := actor.NewActorSystem()
+    props := actor.PropsFromProducer(func() actor.Actor {
+        return NewCommentActor()
+    })
+    
+    pid := system.Root.Spawn(props)
+    userID := uuid.New()
+    postID := uuid.New()
+
+    // Create initial comment
+    createMsg := &CreateCommentMsg{
+        Content:  "Original content",
+        AuthorID: userID,
+        PostID:   postID,
+    }
+    future := system.Root.RequestFuture(pid, createMsg, 5*time.Second)
+    result, err := future.Result()
+    assert.NoError(t, err)
+    comment := result.(*Comment)
+
+    // Test valid edit
+    editMsg := &EditCommentMsg{
+        CommentID: comment.ID,
+        AuthorID:  userID,
+        Content:   "Updated content",
+    }
+    future = system.Root.RequestFuture(pid, editMsg, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    updatedComment := result.(*Comment)
+    assert.Equal(t, "Updated content", updatedComment.Content)
+
+    // Test unauthorized edit
+    unauthorizedEdit := &EditCommentMsg{
+        CommentID: comment.ID,
+        AuthorID:  uuid.New(), // Different user
+        Content:   "Unauthorized update",
+    }
+    future = system.Root.RequestFuture(pid, unauthorizedEdit, 5*time.Second)
+    result, err = future.Result()
+    assert.NoError(t, err)
+    assert.Nil(t, result, "Unauthorized edit should return nil")
+}
