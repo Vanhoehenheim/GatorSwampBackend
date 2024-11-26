@@ -1,16 +1,14 @@
 package engine
 
-// Import necessary packages
 import (
 	"fmt"
 	"gator-swamp/internal/engine/actors"
-	"gator-swamp/internal/models" // Models for Subreddits and Posts
-	"gator-swamp/internal/utils"  // Utility functions and error handling
+	"gator-swamp/internal/utils"
 	"log"
-	"time" // Time utilities
+	"time"
 
-	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
-	"github.com/google/uuid"                  // UUID generation for unique identifiers
+	"github.com/asynkron/protoactor-go/actor"
+	"github.com/google/uuid"
 )
 
 // Add new message types
@@ -35,241 +33,13 @@ type (
 	}
 )
 
-// Message types for Subreddit operations
-
-// GetCountsMsg retrieves the count of subreddits
-type GetCountsMsg struct{}
-
-// CreateSubredditMsg represents a request to create a new subreddit
-type CreateSubredditMsg struct {
-	Name        string    // Name of the subreddit
-	Description string    // Description of the subreddit
-	CreatorID   uuid.UUID // ID of the user creating the subreddit
-}
-
-// JoinSubredditMsg represents a request for a user to join a subreddit
-type JoinSubredditMsg struct {
-	SubredditID uuid.UUID // ID of the subreddit
-	UserID      uuid.UUID // ID of the user joining
-}
-
-// LeaveSubredditMsg handles a user leaving a subreddit
-type LeaveSubredditMsg struct {
-	SubredditID uuid.UUID // ID of the subreddit
-	UserID      uuid.UUID // ID of the user leaving
-}
-
-// ListSubredditsMsg retrieves all subreddits
-type ListSubredditsMsg struct{}
-
-// GetSubredditMembersMsg retrieves all members of a specific subreddit
-type GetSubredditMembersMsg struct {
-	SubredditID uuid.UUID // ID of the subreddit
-}
-
-// GetSubredditDetailsMsg gets detailed information about a subreddit
-type GetSubredditDetailsMsg struct {
-	SubredditID uuid.UUID // ID of the subreddit
-}
-
-// GetSubredditMsg retrieves a subreddit by name
-type GetSubredditMsg struct {
-	Name string // Name of the subreddit
-}
-
-// GetSubredditPostsMsg retrieves all posts in a subreddit
-type GetSubredditPostsMsg struct {
-	SubredditID uuid.UUID // ID of the subreddit
-}
-
-// SubredditActor handles all subreddit-related operations
-type SubredditActor struct {
-	subredditsByName map[string]*models.Subreddit
-	subredditMembers map[uuid.UUID]map[uuid.UUID]bool
-	metrics          *utils.MetricsCollector
-	context          actor.Context // Add this to store context
-}
-
-// Constructor for SubredditActor
-func NewSubredditActor(metrics *utils.MetricsCollector) actor.Actor {
-	return &SubredditActor{
-		subredditsByName: make(map[string]*models.Subreddit),
-		subredditMembers: make(map[uuid.UUID]map[uuid.UUID]bool),
-		metrics:          metrics,
-	}
-}
-
-// Add Started method to initialize context
-func (a *SubredditActor) Started(context actor.Context) {
-	a.context = context
-	log.Printf("SubredditActor started with context: %v", context)
-}
-
-// Receive method processes incoming messages and executes corresponding actions
-func (a *SubredditActor) Receive(context actor.Context) {
-	// Handle messages based on their type
-	switch msg := context.Message().(type) {
-
-	case *CreateSubredditMsg:
-		log.Printf("SubredditActor: Creating subreddit: %s", msg.Name)
-		startTime := time.Now()
-
-		// Only check for duplicate subreddit
-		if _, exists := a.subredditsByName[msg.Name]; exists {
-			context.Respond(utils.NewAppError(utils.ErrDuplicate, "subreddit already exists", nil))
-			return
-		}
-
-		// Create a new subreddit object
-		newSubreddit := &models.Subreddit{
-			ID:          uuid.New(),
-			Name:        msg.Name,
-			Description: msg.Description,
-			CreatorID:   msg.CreatorID,
-			CreatedAt:   time.Now(),
-			Members:     1,
-		}
-
-		// Store the new subreddit
-		a.subredditsByName[msg.Name] = newSubreddit
-		a.subredditMembers[newSubreddit.ID] = map[uuid.UUID]bool{
-			msg.CreatorID: true,
-		}
-
-		a.metrics.AddOperationLatency("create_subreddit", time.Since(startTime))
-		log.Printf("SubredditActor: Successfully created subreddit: %s", newSubreddit.ID)
-		context.Respond(newSubreddit)
-
-	case *GetSubredditMsg:
-		// Handle subreddit retrieval by name
-		if subreddit, exists := a.subredditsByName[msg.Name]; exists {
-			context.Respond(subreddit)
-		} else {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
-		}
-
-	case *JoinSubredditMsg:
-		// Handle user joining a subreddit
-		startTime := time.Now()
-
-		// Find the subreddit by ID
-		var subreddit *models.Subreddit
-		for _, s := range a.subredditsByName {
-			if s.ID == msg.SubredditID {
-				subreddit = s
-				break
-			}
-		}
-
-		// If subreddit does not exist, respond with an error
-		if subreddit == nil {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
-			return
-		}
-
-		// Add the user to the subreddit members
-		if _, exists := a.subredditMembers[msg.SubredditID]; !exists {
-			a.subredditMembers[msg.SubredditID] = make(map[uuid.UUID]bool)
-		}
-		a.subredditMembers[msg.SubredditID][msg.UserID] = true
-		subreddit.Members++
-
-		// Log operation latency and respond with success
-		a.metrics.AddOperationLatency("join_subreddit", time.Since(startTime))
-		context.Respond(true)
-
-	case *LeaveSubredditMsg:
-		// Handle user leaving a subreddit
-		startTime := time.Now()
-
-		// Find the subreddit by ID
-		var subreddit *models.Subreddit
-		for _, s := range a.subredditsByName {
-			if s.ID == msg.SubredditID {
-				subreddit = s
-				break
-			}
-		}
-
-		// If subreddit does not exist, respond with an error
-		if subreddit == nil {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
-			return
-		}
-
-		// Check if the user is a member of the subreddit
-		members := a.subredditMembers[msg.SubredditID]
-		if !members[msg.UserID] {
-			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "user is not a member", nil))
-			return
-		}
-
-		// Remove the user from the subreddit members
-		delete(a.subredditMembers[msg.SubredditID], msg.UserID)
-		subreddit.Members--
-
-		// Log operation latency and respond with success
-		a.metrics.AddOperationLatency("leave_subreddit", time.Since(startTime))
-		context.Respond(true)
-
-	case *ListSubredditsMsg:
-		// Handle request to list all subreddits
-		subreddits := make([]*models.Subreddit, 0, len(a.subredditsByName))
-		for _, sub := range a.subredditsByName {
-			subreddits = append(subreddits, sub)
-		}
-		context.Respond(subreddits)
-
-	case *GetSubredditMembersMsg:
-		// Handle request to get members of a subreddit
-		if members, exists := a.subredditMembers[msg.SubredditID]; exists {
-			memberIDs := make([]uuid.UUID, 0, len(members))
-			for userID := range members {
-				memberIDs = append(memberIDs, userID)
-			}
-			context.Respond(memberIDs)
-		} else {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
-		}
-
-	case *GetSubredditDetailsMsg:
-		// Handle request to get subreddit details
-		var subreddit *models.Subreddit
-		for _, s := range a.subredditsByName {
-			if s.ID == msg.SubredditID {
-				subreddit = s
-				break
-			}
-		}
-
-		// If subreddit does not exist, respond with an error
-		if subreddit == nil {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
-			return
-		}
-
-		// Create a detailed response with subreddit and member count
-		details := struct {
-			Subreddit   *models.Subreddit
-			MemberCount int
-		}{
-			Subreddit:   subreddit,
-			MemberCount: len(a.subredditMembers[msg.SubredditID]),
-		}
-		context.Respond(details)
-	case *GetCountsMsg:
-		count := len(a.subredditsByName)
-		context.Respond(count)
-	}
-}
-
 // Engine coordinates communication between actors
 type Engine struct {
 	subredditActor *actor.PID
 	postActor      *actor.PID
-	userSupervisor *actor.PID              // Changed from userActor to userSupervisor
-	context        *actor.RootContext      // Add this
-	metrics        *utils.MetricsCollector // Added metrics field
+	userSupervisor *actor.PID
+	context        *actor.RootContext
+	metrics        *utils.MetricsCollector
 }
 
 // NewEngine creates a new engine instance with all required actors
@@ -295,11 +65,11 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector) *Engi
 	})
 
 	subredditProps := actor.PropsFromProducer(func() actor.Actor {
-		return NewSubredditActor(metrics)
+		return actors.NewSubredditActor(metrics)
 	})
 
 	postProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewPostActor(metrics, enginePID) // Pass enginePID here
+		return actors.NewPostActor(metrics, enginePID)
 	})
 
 	userSupervisorPID := context.Spawn(supervisorProps)
@@ -328,7 +98,7 @@ func (e *Engine) Receive(context actor.Context) {
 	case *actor.Restarting:
 		log.Printf("Engine restarting")
 
-	case *CreateSubredditMsg:
+	case *actors.CreateSubredditMsg:
 		log.Printf("Engine: Processing CreateSubredditMsg for creator: %s", msg.CreatorID)
 
 		// Validate user exists and has sufficient karma
@@ -373,9 +143,8 @@ func (e *Engine) Receive(context actor.Context) {
 		context.Respond(result)
 
 	case *actors.CreatePostMsg:
-		// First validate user is member of subreddit
 		memberFuture := context.RequestFuture(e.subredditActor,
-			&GetSubredditMembersMsg{SubredditID: msg.SubredditID},
+			&actors.GetSubredditMembersMsg{SubredditID: msg.SubredditID},
 			5*time.Second)
 
 		memberResult, err := memberFuture.Result()
@@ -473,14 +242,14 @@ func (e *Engine) Receive(context actor.Context) {
 // Helper functions to identify message types
 func isSubredditMessage(msg interface{}) bool {
 	switch msg.(type) {
-	case *CreateSubredditMsg,
-		*JoinSubredditMsg,
-		*LeaveSubredditMsg,
-		*ListSubredditsMsg,
-		*GetSubredditMembersMsg,
-		*GetSubredditDetailsMsg,
-		*GetSubredditMsg,
-		*GetCountsMsg:
+	case *actors.CreateSubredditMsg,
+		*actors.JoinSubredditMsg,
+		*actors.LeaveSubredditMsg,
+		*actors.ListSubredditsMsg,
+		*actors.GetSubredditMembersMsg,
+		*actors.GetSubredditDetailsMsg,
+		*actors.GetSubredditMsg,
+		*actors.GetCountsMsg:
 		return true
 	default:
 		return false

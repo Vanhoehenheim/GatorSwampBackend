@@ -6,7 +6,7 @@ import (
 	"fmt"                                // String formatting
 	"gator-swamp/internal/config"        // Configuration handling
 	"gator-swamp/internal/engine"        // Engine for managing actors
-	"gator-swamp/internal/engine/actors" // For UserActors
+	"gator-swamp/internal/engine/actors" // For UserActors, SubredditActors, and PostActors
 	"gator-swamp/internal/utils"         // Utility functions and metrics
 	"log"                                // Logging
 	"net/http"                           // HTTP server
@@ -146,7 +146,7 @@ func main() {
 func (s *Server) handleHealth() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Get the subreddit count from SubredditActor
-		futureSubreddits := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.GetCountsMsg{}, 5*time.Second)
+		futureSubreddits := s.context.RequestFuture(s.engine.GetSubredditActor(), &actors.GetCountsMsg{}, 5*time.Second)
 		subredditResult, err := futureSubreddits.Result()
 		if err != nil {
 			http.Error(w, "Failed to get subreddit count", http.StatusInternalServerError)
@@ -155,7 +155,7 @@ func (s *Server) handleHealth() http.HandlerFunc {
 		subredditCount := subredditResult.(int) // Parse the result
 
 		// Get the post count from PostActor
-		futurePosts := s.context.RequestFuture(s.engine.GetPostActor(), &engine.GetCountsMsg{}, 5*time.Second)
+		futurePosts := s.context.RequestFuture(s.engine.GetPostActor(), &actors.GetCountsMsg{}, 5*time.Second)
 		postResult, err := futurePosts.Result()
 		if err != nil {
 			http.Error(w, "Failed to get post count", http.StatusInternalServerError)
@@ -179,7 +179,7 @@ func (s *Server) handleSubreddits() http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			// Handle listing all subreddits
-			future := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.ListSubredditsMsg{}, 5*time.Second)
+			future := s.context.RequestFuture(s.engine.GetSubredditActor(), &actors.ListSubredditsMsg{}, 5*time.Second)
 			result, err := future.Result()
 			if err != nil {
 				http.Error(w, "Failed to get subreddits", http.StatusInternalServerError)
@@ -204,7 +204,7 @@ func (s *Server) handleSubreddits() http.HandlerFunc {
 			}
 
 			// Create the message
-			msg := &engine.CreateSubredditMsg{
+			msg := &actors.CreateSubredditMsg{
 				Name:        req.Name,
 				Description: req.Description,
 				CreatorID:   creatorID,
@@ -262,7 +262,7 @@ func (s *Server) handleSubredditMembers() http.HandlerFunc {
 		}
 
 		// Create message to get subreddit members
-		msg := &engine.GetSubredditMembersMsg{SubredditID: id}
+		msg := &actors.GetSubredditMembersMsg{SubredditID: id}
 		future := s.context.RequestFuture(s.engine.GetSubredditActor(), msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
