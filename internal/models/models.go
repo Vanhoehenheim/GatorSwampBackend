@@ -31,6 +31,7 @@ type Post struct {
 	CreatedAt   time.Time
 	Upvotes     int
 	Downvotes   int
+	Karma       int // Add Karma field to track post karma
 }
 
 // Comment represents a comment on a post or another comment

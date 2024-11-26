@@ -2,15 +2,17 @@ package main
 
 // Import necessary packages
 import (
-	"encoding/json"               // JSON encoding and decoding
-	"fmt"                         // String formatting
-	"gator-swamp/internal/config" // Configuration handling
-	"gator-swamp/internal/engine" // Engine for managing actors
-	"gator-swamp/internal/utils"  // Utility functions and metrics
-	"log"                         // Logging
-	"net/http"                    // HTTP server
-	"time"                        // Time utilities
-	"gator-swamp/internal/engine/actors"  // For UserActors
+	"encoding/json"                      // JSON encoding and decoding
+	"fmt"                                // String formatting
+	"gator-swamp/internal/config"        // Configuration handling
+	"gator-swamp/internal/engine"        // Engine for managing actors
+	"gator-swamp/internal/engine/actors" // For UserActors
+	"gator-swamp/internal/utils"         // Utility functions and metrics
+	"log"                                // Logging
+	"net/http"                           // HTTP server
+	"strconv"                            // String conversion utilities
+	"time"                               // Time utilities
+
 	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
 	"github.com/google/uuid"                  // UUID generation for unique identifiers
 )
@@ -43,45 +45,51 @@ type SubredditResponse struct {
 
 // Server holds all server dependencies, including the actor system and engine
 type Server struct {
-	system  *actor.ActorSystem      // Actor system
-	context *actor.RootContext      // Root context for actors
-	engine  *engine.Engine          // Engine managing actors
-	metrics *utils.MetricsCollector // Metrics collector
-	userActor      *actor.PID        // User actor system
+	system  *actor.ActorSystem
+	context *actor.RootContext
+	engine  *engine.Engine
+	metrics *utils.MetricsCollector
+	// Remove userActor field as we'll use engine.GetUserSupervisor()
 }
 
 // User-related request structures
 type RegisterUserRequest struct {
-    Username string `json:"username"`
-    Email    string `json:"email"`
-    Password string `json:"password"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Karma    int    `json:"karma"`
 }
-//User-related login
+
+// User-related login
 type LoginRequest struct {
-    Email    string `json:"email"`
-    Password string `json:"password"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type LoginResponse struct {
-    Success bool   `json:"success"`
-    Token   string `json:"token,omitempty"`
-    Error   string `json:"error,omitempty"`
+	Success bool   `json:"success"`
+	Token   string `json:"token,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// Add new request types
+type VoteRequest struct {
+	UserID   string `json:"userId"`
+	PostID   string `json:"postId"`
+	IsUpvote bool   `json:"isUpvote"`
+}
+
+type GetFeedRequest struct {
+	UserID string `json:"userId"`
+	Limit  int    `json:"limit"`
 }
 
 func main() {
-	// Initialize application components
-	cfg := config.DefaultConfig()          // Load default configurations
-	metrics := utils.NewMetricsCollector() // Initialize metrics collector
-
-	// Initialize the ProtoActor system
+	cfg := config.DefaultConfig()
+	metrics := utils.NewMetricsCollector()
 	system := actor.NewActorSystem()
-
-	// Initialize the engine with actors
 	gatorEngine := engine.NewEngine(system, metrics)
 
-	
-
-	// Create the server instance with all dependencies
 	server := &Server{
 		system:  system,
 		context: system.Root,
@@ -89,19 +97,17 @@ func main() {
 		metrics: metrics,
 	}
 
-	 // Initialize user actor
-	 server.userActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
-        return actors.NewUserActor(nil)
-    }))
-
 	// Set up HTTP endpoints
-	http.HandleFunc("/health", server.handleHealth())                      // Health check endpoint
-	http.HandleFunc("/subreddit", server.handleSubreddits())               // Endpoint for subreddit-related operations
-	http.HandleFunc("/subreddit/members", server.handleSubredditMembers()) // Endpoint for subreddit members
-	http.HandleFunc("/post", server.handlePost())                          // Endpoint for post-related operations
-    http.HandleFunc("/user/register", server.handleUserRegistration())     // Endpoint for register
-    http.HandleFunc("/user/login", server.handleUserLogin())               //Endpoint for login
-	// Start the HTTP server
+	http.HandleFunc("/health", server.handleHealth())
+	http.HandleFunc("/subreddit", server.handleSubreddits())
+	http.HandleFunc("/subreddit/members", server.handleSubredditMembers())
+	http.HandleFunc("/post", server.handlePost())
+	http.HandleFunc("/user/register", server.handleUserRegistration())
+	http.HandleFunc("/user/login", server.handleUserLogin())
+	http.HandleFunc("/post/vote", server.handleVote())    // New endpoint
+	http.HandleFunc("/user/feed", server.handleGetFeed()) // New endpoint
+	http.HandleFunc("/user/profile", server.handleUserProfile())
+
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
 	if err := http.ListenAndServe(serverAddr, nil); err != nil {
@@ -158,38 +164,51 @@ func (s *Server) handleSubreddits() http.HandlerFunc {
 			json.NewEncoder(w).Encode(result)
 
 		case http.MethodPost:
-			// Handle creating a new subreddit
 			var req CreateSubredditRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "Invalid request", http.StatusBadRequest)
 				return
 			}
 
-			// Convert CreatorID to UUID and create subreddit message
 			creatorID, err := uuid.Parse(req.CreatorID)
 			if err != nil {
 				http.Error(w, "Invalid creator ID format", http.StatusBadRequest)
 				return
 			}
+
 			future := s.context.RequestFuture(s.engine.GetSubredditActor(), &engine.CreateSubredditMsg{
 				Name:        req.Name,
 				Description: req.Description,
 				CreatorID:   creatorID,
 			}, 5*time.Second)
 
-			// Handle the response from the actor
 			result, err := future.Result()
 			if err != nil {
-				http.Error(w, "Failed to create subreddit", http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("Failed to create subreddit: %v", err), http.StatusInternalServerError)
 				return
 			}
 
-			// Respond with the created subreddit details
+			// Check for application errors
+			if appErr, ok := result.(*utils.AppError); ok {
+				var statusCode int
+				switch appErr.Code {
+				case utils.ErrNotFound:
+					statusCode = http.StatusNotFound
+				case utils.ErrInvalidInput:
+					statusCode = http.StatusBadRequest
+				case utils.ErrUnauthorized:
+					statusCode = http.StatusUnauthorized
+				default:
+					statusCode = http.StatusInternalServerError
+				}
+				http.Error(w, appErr.Error(), statusCode)
+				return
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(result)
 
 		default:
-			// Handle unsupported HTTP methods
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}
@@ -273,62 +292,195 @@ func (s *Server) handlePost() http.HandlerFunc {
 		}
 	}
 }
-//Handler for registration
+
+// Handler for registration
+// Update registration handler to use UserSupervisor
 func (s *Server) handleUserRegistration() http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        if r.Method != http.MethodPost {
-            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-            return
-        }
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-        var req RegisterUserRequest
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            http.Error(w, "Invalid request", http.StatusBadRequest)
-            return
-        }
+		var req RegisterUserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
 
-        future := s.context.RequestFuture(s.userActor, &actors.RegisterUserMsg{
-            Username: req.Username,
-            Email:    req.Email,
-            Password: req.Password,
-        }, 5*time.Second)
+		// Use Engine's UserSupervisor instead
+		future := s.context.RequestFuture(
+			s.engine.GetUserSupervisor(),
+			&actors.RegisterUserMsg{
+				Username: req.Username,
+				Email:    req.Email,
+				Password: req.Password,
+				Karma:    req.Karma,
+			},
+			5*time.Second,
+		)
 
-        result, err := future.Result()
-        if err != nil {
-            http.Error(w, "Failed to register user", http.StatusInternalServerError)
-            return
-        }
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to register user: %v", err), http.StatusInternalServerError)
+			return
+		}
 
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(result)
-    }
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
 }
-//Handler for login
+
+// Handler for login
+// Update login handler to use UserSupervisor
 func (s *Server) handleUserLogin() http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        if r.Method != http.MethodPost {
-            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-            return
-        }
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-        var req LoginRequest
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            http.Error(w, "Invalid request", http.StatusBadRequest)
-            return
-        }
+		var req LoginRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
 
-        future := s.context.RequestFuture(s.userActor, &actors.LoginMsg{
-            Email:    req.Email,
-            Password: req.Password,
-        }, 5*time.Second)
+		future := s.context.RequestFuture(s.engine.GetUserSupervisor(), &actors.LoginMsg{
+			Email:    req.Email,
+			Password: req.Password,
+		}, 5*time.Second)
 
-        result, err := future.Result()
-        if err != nil {
-            http.Error(w, "Failed to process login", http.StatusInternalServerError)
-            return
-        }
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to process login", http.StatusInternalServerError)
+			return
+		}
 
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(result)
-    }
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// Add user profile handler
+func (s *Server) handleUserProfile() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get userID from query parameters
+		userIDStr := r.URL.Query().Get("userId")
+		if userIDStr == "" {
+			http.Error(w, "User ID required", http.StatusBadRequest)
+			return
+		}
+
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			http.Error(w, "Invalid user ID format", http.StatusBadRequest)
+			return
+		}
+
+		// Request user profile from UserSupervisor through Engine
+		future := s.context.RequestFuture(
+			s.engine.GetUserSupervisor(),
+			&actors.GetUserProfileMsg{UserID: userID},
+			5*time.Second,
+		)
+
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to get user profile", http.StatusInternalServerError)
+			return
+		}
+
+		if result == nil {
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+func (s *Server) handleVote() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req VoteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+
+		userID, err := uuid.Parse(req.UserID)
+		if err != nil {
+			http.Error(w, "Invalid user ID", http.StatusBadRequest)
+			return
+		}
+
+		postID, err := uuid.Parse(req.PostID)
+		if err != nil {
+			http.Error(w, "Invalid post ID", http.StatusBadRequest)
+			return
+		}
+
+		future := s.context.RequestFuture(s.engine.GetPostActor(), &engine.VotePostMsg{
+			PostID:   postID,
+			UserID:   userID,
+			IsUpvote: req.IsUpvote,
+		}, 5*time.Second)
+
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to process vote", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// Add new handler for getting user feed
+func (s *Server) handleGetFeed() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID, err := uuid.Parse(r.URL.Query().Get("userId"))
+		if err != nil {
+			http.Error(w, "Invalid user ID", http.StatusBadRequest)
+			return
+		}
+
+		limit := 50 // Default limit
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if parsedLimit, err := strconv.Atoi(limitStr); err == nil {
+				limit = parsedLimit
+			}
+		}
+
+		future := s.context.RequestFuture(s.engine.GetPostActor(), &engine.GetUserFeedMsg{
+			UserID: userID,
+			Limit:  limit,
+		}, 5*time.Second)
+
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to get feed", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
 }
