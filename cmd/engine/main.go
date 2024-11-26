@@ -43,26 +43,13 @@ type SubredditResponse struct {
 	CreatedAt   time.Time `json:"createdAt"`   // Timestamp of creation
 }
 
-// Request/Response to create a comment
-type CreateCommentRequest struct {
-	Content  string `json:"content"`
-	AuthorID string `json:"authorId"`
-	PostID   string `json:"postId"`
-	ParentID string `json:"parentId,omitempty"` // Optional, for replies
-}
-
-type EditCommentRequest struct {
-	CommentID string `json:"commentId"`
-	AuthorID  string `json:"authorId"`
-	Content   string `json:"content"`
-}
-
 // Server holds all server dependencies, including the actor system and engine
 type Server struct {
 	system  *actor.ActorSystem
 	context *actor.RootContext
 	engine  *engine.Engine
 	metrics *utils.MetricsCollector
+	commentActor *actor.PID //Added comment actor
 	// Remove userActor field as we'll use engine.GetUserSupervisor()
 }
 
@@ -98,6 +85,21 @@ type GetFeedRequest struct {
 	Limit  int    `json:"limit"`
 }
 
+//Creating Comments struct
+type CreateCommentRequest struct {
+    Content   string `json:"content"`
+    AuthorID  string `json:"authorId"`
+    PostID    string `json:"postId"`
+    ParentID  string `json:"parentId,omitempty"`  // Optional, for replies
+}
+// Editing Comments struct
+type EditCommentRequest struct {
+    CommentID string `json:"commentId"`
+    AuthorID  string `json:"authorId"`
+    Content   string `json:"content"`
+}
+
+
 func main() {
 	cfg := config.DefaultConfig()
 	metrics := utils.NewMetricsCollector()
@@ -110,7 +112,10 @@ func main() {
 		engine:  gatorEngine,
 		metrics: metrics,
 	}
-
+	 // Initialize comment actor
+	 server.commentActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
+        return actors.NewCommentActor()
+    }))
 	// Set up HTTP endpoints
 	http.HandleFunc("/health", server.handleHealth())
 	http.HandleFunc("/subreddit", server.handleSubreddits())
@@ -121,6 +126,8 @@ func main() {
 	http.HandleFunc("/post/vote", server.handleVote())    // New endpoint
 	http.HandleFunc("/user/feed", server.handleGetFeed()) // New endpoint
 	http.HandleFunc("/user/profile", server.handleUserProfile())
+	http.HandleFunc("/comment", server.handleComment()) //Comment actor
+    http.HandleFunc("/comment/post", server.handleGetPostComments())//Post comment actor
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
@@ -515,4 +522,158 @@ func (s *Server) handleGetFeed() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	}
+}
+
+func (s *Server) handleComment() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        switch r.Method {
+        case http.MethodPost:
+            var req CreateCommentRequest
+            if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                http.Error(w, "Invalid request", http.StatusBadRequest)
+                return
+            }
+
+            authorID, err := uuid.Parse(req.AuthorID)
+            if err != nil {
+                http.Error(w, "Invalid author ID", http.StatusBadRequest)
+                return
+            }
+
+            postID, err := uuid.Parse(req.PostID)
+            if err != nil {
+                http.Error(w, "Invalid post ID", http.StatusBadRequest)
+                return
+            }
+
+            var parentID *uuid.UUID
+            if req.ParentID != "" {
+                parsed, err := uuid.Parse(req.ParentID)
+                if err != nil {
+                    http.Error(w, "Invalid parent comment ID", http.StatusBadRequest)
+                    return
+                }
+                parentID = &parsed
+            }
+
+            future := s.context.RequestFuture(s.commentActor, &actors.CreateCommentMsg{
+                Content:  req.Content,
+                AuthorID: authorID,
+                PostID:   postID,
+                ParentID: parentID,
+            }, 5*time.Second)
+
+            result, err := future.Result()
+            if err != nil {
+                http.Error(w, "Failed to create comment", http.StatusInternalServerError)
+                return
+            }
+
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(result)
+
+        case http.MethodPut:
+            var req EditCommentRequest
+            if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                http.Error(w, "Invalid request", http.StatusBadRequest)
+                return
+            }
+
+            commentID, err := uuid.Parse(req.CommentID)
+            if err != nil {
+                http.Error(w, "Invalid comment ID", http.StatusBadRequest)
+                return
+            }
+
+            authorID, err := uuid.Parse(req.AuthorID)
+            if err != nil {
+                http.Error(w, "Invalid author ID", http.StatusBadRequest)
+                return
+            }
+
+            future := s.context.RequestFuture(s.commentActor, &actors.EditCommentMsg{
+                CommentID: commentID,
+                AuthorID:  authorID,
+                Content:  req.Content,
+            }, 5*time.Second)
+
+            result, err := future.Result()
+            if err != nil {
+                http.Error(w, "Failed to edit comment", http.StatusInternalServerError)
+                return
+            }
+
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(result)
+
+        case http.MethodDelete:
+            commentID := r.URL.Query().Get("commentId")
+            authorID := r.URL.Query().Get("authorId")
+
+            if commentID == "" || authorID == "" {
+                http.Error(w, "Missing comment ID or author ID", http.StatusBadRequest)
+                return
+            }
+
+            cID, err := uuid.Parse(commentID)
+            if err != nil {
+                http.Error(w, "Invalid comment ID", http.StatusBadRequest)
+                return
+            }
+
+            aID, err := uuid.Parse(authorID)
+            if err != nil {
+                http.Error(w, "Invalid author ID", http.StatusBadRequest)
+                return
+            }
+
+            future := s.context.RequestFuture(s.commentActor, &actors.DeleteCommentMsg{
+                CommentID: cID,
+                AuthorID:  aID,
+            }, 5*time.Second)
+
+            result, err := future.Result()
+            if err != nil {
+                http.Error(w, "Failed to delete comment", http.StatusInternalServerError)
+                return
+            }
+
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(map[string]bool{"success": result.(bool)})
+        }
+    }
+}
+//Comment Actor
+func (s *Server) handleGetPostComments() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+        postID := r.URL.Query().Get("postId")
+        if postID == "" {
+            http.Error(w, "Missing post ID", http.StatusBadRequest)
+            return
+        }
+
+        pID, err := uuid.Parse(postID)
+        if err != nil {
+            http.Error(w, "Invalid post ID", http.StatusBadRequest)
+            return
+        }
+
+        future := s.context.RequestFuture(s.commentActor, &actors.GetCommentsForPostMsg{
+            PostID: pID,
+        }, 5*time.Second)
+
+        result, err := future.Result()
+        if err != nil {
+            http.Error(w, "Failed to get comments", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(result)
+    }
 }
