@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"gator-swamp/internal/utils"
+	"log"
 	"sync"
 	"time"
 
@@ -161,6 +162,19 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 			return
 		}
 		context.Respond(result)
+
+	case *UpdateKarmaMsg:
+		s.mu.RLock()
+		pid, exists := s.userActors[msg.UserID]
+		s.mu.RUnlock()
+
+		if !exists {
+			log.Printf("UserSupervisor: User %s not found for karma update", msg.UserID)
+			return
+		}
+
+		log.Printf("UserSupervisor: Forwarding karma update to user actor %s", msg.UserID)
+		context.Send(pid, msg)
 	}
 }
 
@@ -234,8 +248,9 @@ func (a *UserActor) Receive(context actor.Context) {
 
 	case *UpdateKarmaMsg:
 		if a.state.ID == msg.UserID {
+			log.Printf("UserActor: Updating karma for user %s by %d", msg.UserID, msg.Delta)
 			a.state.Karma += msg.Delta
-			context.Respond(a.state.Karma)
+			// No need to respond since we're using Send instead of RequestFuture
 		}
 
 	case *GetUserProfileMsg:

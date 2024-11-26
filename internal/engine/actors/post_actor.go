@@ -2,7 +2,8 @@ package actors
 
 import (
 	"gator-swamp/internal/models"
-	"gator-swamp/internal/utils"
+	"gator-swamp/internal/utils" // Add this for UpdateKarmaMsg
+	"log"
 	"sort"
 	"time"
 
@@ -58,21 +59,34 @@ type PostActor struct {
 	subredditPosts map[uuid.UUID][]uuid.UUID
 	postVotes      map[uuid.UUID]map[uuid.UUID]voteStatus
 	metrics        *utils.MetricsCollector
+	enginePID      *actor.PID // Add this field
 }
 
 // NewPostActor creates a new PostActor instance
-func NewPostActor(metrics *utils.MetricsCollector) actor.Actor {
+func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID) actor.Actor {
 	return &PostActor{
 		postsByID:      make(map[uuid.UUID]*models.Post),
 		subredditPosts: make(map[uuid.UUID][]uuid.UUID),
 		postVotes:      make(map[uuid.UUID]map[uuid.UUID]voteStatus),
 		metrics:        metrics,
+		enginePID:      enginePID,
 	}
 }
 
 // Receive handles incoming messages
 func (a *PostActor) Receive(context actor.Context) {
 	switch msg := context.Message().(type) {
+	case *actor.Started:
+		log.Printf("PostActor started")
+
+	case *actor.Stopping:
+		log.Printf("PostActor stopping")
+
+	case *actor.Stopped:
+		log.Printf("PostActor stopped")
+
+	case *actor.Restarting:
+		log.Printf("PostActor restarting")
 	case *CreatePostMsg:
 		a.handleCreatePost(context, msg)
 	case *GetPostMsg:
@@ -80,11 +94,14 @@ func (a *PostActor) Receive(context actor.Context) {
 	case *GetSubredditPostsMsg:
 		a.handleGetSubredditPosts(context, msg)
 	case *VotePostMsg:
+		log.Printf("PostActor: Processing vote for post: %s from user: %s", msg.PostID, msg.UserID)
 		a.handleVote(context, msg)
 	case *GetUserFeedMsg:
 		a.handleGetUserFeed(context, msg)
 	case *GetCountsMsg:
 		context.Respond(len(a.postsByID))
+	default:
+		log.Printf("PostActor: Unknown message type: %T", msg)
 	}
 }
 
@@ -135,8 +152,11 @@ func (a *PostActor) handleGetSubredditPosts(context actor.Context, msg *GetSubre
 
 func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 	startTime := time.Now()
+
+	log.Printf("PostActor: Looking up post %s", msg.PostID)
 	post, exists := a.postsByID[msg.PostID]
 	if !exists {
+		log.Printf("PostActor: Post not found: %s", msg.PostID)
 		context.Respond(utils.NewAppError(utils.ErrNotFound, "Post not found", nil))
 		return
 	}
@@ -150,6 +170,7 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 
 	if hasVoted {
 		if previousVote.IsUpvote == msg.IsUpvote {
+			log.Printf("PostActor: User %s already voted on post %s", msg.UserID, msg.PostID)
 			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
 			return
 		}
@@ -178,7 +199,7 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 	post.Karma = post.Upvotes - post.Downvotes
 
 	// Update author's karma
-	context.Send(context.Parent(), &UpdateKarmaMsg{
+	karmaMsg := &UpdateKarmaMsg{
 		UserID: post.AuthorID,
 		Delta: func() int {
 			if msg.IsUpvote {
@@ -186,7 +207,10 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 			}
 			return -1
 		}(),
-	})
+	}
+
+	log.Printf("PostActor: Sending karma update to Engine for user %s", post.AuthorID)
+	context.Send(a.enginePID, karmaMsg) // Use Send instead of RequestFuture
 
 	a.metrics.AddOperationLatency("vote_post", time.Since(startTime))
 	context.Respond(post)

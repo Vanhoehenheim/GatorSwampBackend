@@ -267,68 +267,71 @@ func (a *SubredditActor) Receive(context actor.Context) {
 type Engine struct {
 	subredditActor *actor.PID
 	postActor      *actor.PID
-	userSupervisor *actor.PID         // Changed from userActor to userSupervisor
-	context        *actor.RootContext // Add this
+	userSupervisor *actor.PID              // Changed from userActor to userSupervisor
+	context        *actor.RootContext      // Add this
+	metrics        *utils.MetricsCollector // Added metrics field
 }
 
-// NewEngine initializes the engine by spawning the required actors
-// Update NewEngine to create UserSupervisor
+// NewEngine creates a new engine instance with all required actors
 func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector) *Engine {
 	context := system.Root
-
-	// Add debug logs
 	log.Printf("Creating Engine with actors...")
 
-	// Spawn UserSupervisor
-	userSupProps := actor.PropsFromProducer(func() actor.Actor {
-		log.Printf("Creating UserSupervisor")
+	// Create the Engine first
+	e := &Engine{
+		context: context,
+		metrics: metrics,
+	}
+
+	// Create props with Engine's PID
+	engineProps := actor.PropsFromProducer(func() actor.Actor {
+		return e
+	})
+	enginePID := context.Spawn(engineProps)
+
+	// Now create other actors with enginePID
+	supervisorProps := actor.PropsFromProducer(func() actor.Actor {
 		return actors.NewUserSupervisor()
 	})
-	userSupervisorPID := context.Spawn(userSupProps)
-	log.Printf("UserSupervisor PID: %v", userSupervisorPID)
 
-	// Spawn SubredditActor
 	subredditProps := actor.PropsFromProducer(func() actor.Actor {
-		log.Printf("Creating SubredditActor")
 		return NewSubredditActor(metrics)
 	})
-	subredditPID := context.Spawn(subredditProps)
-	log.Printf("SubredditActor PID: %v", subredditPID)
 
-	// Spawn PostActor from actors package
 	postProps := actor.PropsFromProducer(func() actor.Actor {
-		log.Printf("Creating PostActor")
-		return actors.NewPostActor(metrics)
+		return actors.NewPostActor(metrics, enginePID) // Pass enginePID here
 	})
-	postPID := context.Spawn(postProps)
-	log.Printf("PostActor PID: %v", postPID)
 
-	return &Engine{
-		subredditActor: subredditPID,
-		postActor:      postPID,
-		userSupervisor: userSupervisorPID,
-		context:        context,
-	}
+	userSupervisorPID := context.Spawn(supervisorProps)
+	subredditPID := context.Spawn(subredditProps)
+	postPID := context.Spawn(postProps)
+
+	e.userSupervisor = userSupervisorPID
+	e.subredditActor = subredditPID
+	e.postActor = postPID
+
+	return e
 }
 
 // Make Engine implement the Actor interface
 func (e *Engine) Receive(context actor.Context) {
-	log.Printf("Engine received message: %T", context.Message())
 	switch msg := context.Message().(type) {
-	case *actors.GetUserProfileMsg:
-		// Forward user profile requests to UserSupervisor
-		future := context.RequestFuture(e.userSupervisor, msg, 5*time.Second)
-		result, err := future.Result()
-		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to get user profile", err))
-			return
-		}
-		context.Respond(result)
+	case *actor.Started:
+		log.Printf("Engine started")
+
+	case *actor.Stopping:
+		log.Printf("Engine stopping")
+
+	case *actor.Stopped:
+		log.Printf("Engine stopped")
+
+	case *actor.Restarting:
+		log.Printf("Engine restarting")
 
 	case *CreateSubredditMsg:
 		log.Printf("Engine: Processing CreateSubredditMsg for creator: %s", msg.CreatorID)
 
-		// 1. Validate user first
+		// Validate user exists and has sufficient karma
 		userFuture := context.RequestFuture(e.userSupervisor,
 			&actors.GetUserProfileMsg{UserID: msg.CreatorID},
 			5*time.Second)
@@ -348,7 +351,7 @@ func (e *Engine) Receive(context actor.Context) {
 			return
 		}
 
-		// 2. Check karma requirement
+		// Check karma requirement
 		if userState.Karma < 100 {
 			log.Printf("Engine: Insufficient karma for user %s", msg.CreatorID)
 			context.Respond(utils.NewAppError(utils.ErrInvalidInput,
@@ -356,7 +359,7 @@ func (e *Engine) Receive(context actor.Context) {
 			return
 		}
 
-		// Only proceed if user exists and has enough karma
+		// Forward to SubredditActor
 		future := context.RequestFuture(e.subredditActor, msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
@@ -369,7 +372,7 @@ func (e *Engine) Receive(context actor.Context) {
 		log.Printf("Engine: Subreddit creation completed")
 		context.Respond(result)
 
-	case *actors.CreatePostMsg: // This comes from actors package now
+	case *actors.CreatePostMsg:
 		// First validate user is member of subreddit
 		memberFuture := context.RequestFuture(e.subredditActor,
 			&GetSubredditMembersMsg{SubredditID: msg.SubredditID},
@@ -401,7 +404,7 @@ func (e *Engine) Receive(context actor.Context) {
 			return
 		}
 
-		// After validation, forward to PostActor
+		// Forward to PostActor
 		future := context.RequestFuture(e.postActor, msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
@@ -411,7 +414,7 @@ func (e *Engine) Receive(context actor.Context) {
 		context.Respond(result)
 
 	case *actors.VotePostMsg:
-		// Validate user exists before allowing vote
+		// Validate user exists
 		userFuture := context.RequestFuture(e.userSupervisor,
 			&actors.GetUserProfileMsg{UserID: msg.UserID},
 			5*time.Second)
@@ -432,60 +435,39 @@ func (e *Engine) Receive(context actor.Context) {
 		context.Respond(result)
 
 	case *actors.UpdateKarmaMsg:
-		// Route karma updates to UserSupervisor
-		future := context.RequestFuture(e.userSupervisor, msg, 5*time.Second)
+		log.Printf("Engine: Forwarding karma update to UserSupervisor")
+		context.Send(e.userSupervisor, msg)
+
+	default:
+		// Route message based on type
+		var targetPID *actor.PID
+		var msgType string
+
+		switch {
+		case isSubredditMessage(msg):
+			targetPID = e.subredditActor
+			msgType = "subreddit"
+		case isUserMessage(msg):
+			targetPID = e.userSupervisor
+			msgType = "user"
+		case isPostMessage(msg):
+			targetPID = e.postActor
+			msgType = "post"
+		default:
+			log.Printf("Unknown message type: %T", msg)
+			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "Unknown message type", nil))
+			return
+		}
+
+		future := context.RequestFuture(targetPID, msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to update karma", err))
+			context.Respond(utils.NewAppError(utils.ErrActorTimeout,
+				fmt.Sprintf("Failed to process %s request", msgType), err))
 			return
 		}
 		context.Respond(result)
-
-	default:
-		switch {
-		case isSubredditMessage(msg):
-			future := context.RequestFuture(e.subredditActor, msg, 5*time.Second)
-			result, err := future.Result()
-			if err != nil {
-				context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process subreddit request", err))
-				return
-			}
-			context.Respond(result)
-
-		case isUserMessage(msg):
-			future := context.RequestFuture(e.userSupervisor, msg, 5*time.Second)
-			result, err := future.Result()
-			if err != nil {
-				context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process user request", err))
-				return
-			}
-			context.Respond(result)
-
-		case isPostMessage(msg): // Using IsPostMessage from actors package
-			future := context.RequestFuture(e.postActor, msg, 5*time.Second)
-			result, err := future.Result()
-			if err != nil {
-				context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process post request", err))
-				return
-			}
-			context.Respond(result)
-		}
 	}
-}
-
-// Add getter for UserSupervisor
-func (e *Engine) GetUserSupervisor() *actor.PID {
-	return e.userSupervisor
-}
-
-// GetSubredditActor returns the PID of the SubredditActor
-func (e *Engine) GetSubredditActor() *actor.PID {
-	return e.subredditActor
-}
-
-// GetPostActor returns the PID of the PostActor
-func (e *Engine) GetPostActor() *actor.PID {
-	return e.postActor
 }
 
 // Helper functions to identify message types
@@ -497,7 +479,8 @@ func isSubredditMessage(msg interface{}) bool {
 		*ListSubredditsMsg,
 		*GetSubredditMembersMsg,
 		*GetSubredditDetailsMsg,
-		*GetSubredditMsg:
+		*GetSubredditMsg,
+		*GetCountsMsg:
 		return true
 	default:
 		return false
@@ -507,10 +490,10 @@ func isSubredditMessage(msg interface{}) bool {
 func isUserMessage(msg interface{}) bool {
 	switch msg.(type) {
 	case *actors.RegisterUserMsg,
-		*actors.UpdateProfileMsg,
-		*actors.UpdateKarmaMsg,
+		*actors.LoginMsg,
 		*actors.GetUserProfileMsg,
-		*actors.LoginMsg:
+		*actors.UpdateProfileMsg,
+		*actors.UpdateKarmaMsg:
 		return true
 	default:
 		return false
@@ -523,9 +506,23 @@ func isPostMessage(msg interface{}) bool {
 		*actors.GetPostMsg,
 		*actors.GetSubredditPostsMsg,
 		*actors.VotePostMsg,
-		*actors.GetUserFeedMsg:
+		*actors.GetUserFeedMsg,
+		*actors.DeletePostMsg:
 		return true
 	default:
 		return false
 	}
+}
+
+// Getter methods for actor PIDs
+func (e *Engine) GetUserSupervisor() *actor.PID {
+	return e.userSupervisor
+}
+
+func (e *Engine) GetSubredditActor() *actor.PID {
+	return e.subredditActor
+}
+
+func (e *Engine) GetPostActor() *actor.PID {
+	return e.postActor
 }
