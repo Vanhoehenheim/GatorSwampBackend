@@ -40,21 +40,29 @@ type SubredditResponse struct {
 	Members     int       `json:"members"`     // Number of members
 	CreatedAt   time.Time `json:"createdAt"`   // Timestamp of creation
 }
+// Request/Response to create a comment
+type CreateCommentRequest struct {
+    Content   string `json:"content"`
+    AuthorID  string `json:"authorId"`
+    PostID    string `json:"postId"`
+    ParentID  string `json:"parentId,omitempty"`  // Optional, for replies
+}
+
+type EditCommentRequest struct {
+    CommentID string `json:"commentId"`
+    AuthorID  string `json:"authorId"`
+    Content   string `json:"content"`
+}
 
 // Server holds all server dependencies, including the actor system and engine
-type Server struct {
-	system  *actor.ActorSystem      // Actor system
-	context *actor.RootContext      // Root context for actors
-	engine  *engine.Engine          // Engine managing actors
-	metrics *utils.MetricsCollector // Metrics collector
-	userActor      *actor.PID        // User actor system
-}
+
 
 // User-related request structures
 type RegisterUserRequest struct {
     Username string `json:"username"`
     Email    string `json:"email"`
     Password string `json:"password"`
+	Karma    int    `json:"Karma"`
 }
 //User-related login
 type LoginRequest struct {
@@ -67,7 +75,14 @@ type LoginResponse struct {
     Token   string `json:"token,omitempty"`
     Error   string `json:"error,omitempty"`
 }
-
+type Server struct {
+	system  *actor.ActorSystem      // Actor system
+	context *actor.RootContext      // Root context for actors
+	engine  *engine.Engine          // Engine managing actors
+	metrics *utils.MetricsCollector // Metrics collector
+	userActor      *actor.PID        // User actor system
+	commentActor *actor.PID   		//Comment Actor System 
+}
 func main() {
 	// Initialize application components
 	cfg := config.DefaultConfig()          // Load default configurations
@@ -291,6 +306,7 @@ func (s *Server) handleUserRegistration() http.HandlerFunc {
             Username: req.Username,
             Email:    req.Email,
             Password: req.Password,
+			Karma: req.Karma,
         }, 5*time.Second)
 
         result, err := future.Result()

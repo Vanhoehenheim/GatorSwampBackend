@@ -14,6 +14,7 @@ type (
         Username string
         Email    string
         Password string
+        Karma int
     }
 
     UpdateProfileMsg struct {
@@ -95,11 +96,13 @@ func (a *UserActor) Receive(context actor.Context) {
         a.state.Username = msg.Username
         a.state.Email = msg.Email
         a.state.HashedPassword = hashedPassword
-        
+        a.state.Karma = 300
         context.Respond(&UserState{
             ID:       a.state.ID,
             Username: a.state.Username,
             Email:    a.state.Email,
+            Karma:    a.state.Karma,
+
         })
 
     case *UpdateProfileMsg:
