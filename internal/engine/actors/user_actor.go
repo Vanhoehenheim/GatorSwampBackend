@@ -177,7 +177,7 @@ func NewUserActor(id uuid.UUID, msg *RegisterUserMsg) *UserActor {
 			ID:            id,
 			Username:      msg.Username,
 			Email:         msg.Email,
-			Karma:         200,
+			Karma:         300,
 			Posts:         make([]uuid.UUID, 0),
 			Comments:      make([]uuid.UUID, 0),
 			VotedPosts:    make(map[uuid.UUID]bool),

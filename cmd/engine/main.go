@@ -282,7 +282,7 @@ func (s *Server) handlePost() http.HandlerFunc {
 				http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
 				return
 			}
-			future := s.context.RequestFuture(s.engine.GetPostActor(), &engine.CreatePostMsg{
+			future := s.context.RequestFuture(s.engine.GetPostActor(), &actors.CreatePostMsg{
 				Title:       req.Title,
 				Content:     req.Content,
 				AuthorID:    authorID,
@@ -435,17 +435,18 @@ func (s *Server) handleVote() http.HandlerFunc {
 
 		userID, err := uuid.Parse(req.UserID)
 		if err != nil {
-			http.Error(w, "Invalid user ID", http.StatusBadRequest)
+			http.Error(w, "Invalid user ID format", http.StatusBadRequest)
 			return
 		}
 
 		postID, err := uuid.Parse(req.PostID)
 		if err != nil {
-			http.Error(w, "Invalid post ID", http.StatusBadRequest)
+			http.Error(w, "Invalid post ID format", http.StatusBadRequest)
 			return
 		}
 
-		future := s.context.RequestFuture(s.engine.GetPostActor(), &engine.VotePostMsg{
+		// Now using actors.VotePostMsg instead of engine.VotePostMsg
+		future := s.context.RequestFuture(s.engine.GetPostActor(), &actors.VotePostMsg{
 			PostID:   postID,
 			UserID:   userID,
 			IsUpvote: req.IsUpvote,
@@ -453,7 +454,24 @@ func (s *Server) handleVote() http.HandlerFunc {
 
 		result, err := future.Result()
 		if err != nil {
-			http.Error(w, "Failed to process vote", http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Failed to process vote: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Check for application errors
+		if appErr, ok := result.(*utils.AppError); ok {
+			var statusCode int
+			switch appErr.Code {
+			case utils.ErrNotFound:
+				statusCode = http.StatusNotFound
+			case utils.ErrUnauthorized:
+				statusCode = http.StatusUnauthorized
+			case utils.ErrDuplicate:
+				statusCode = http.StatusConflict
+			default:
+				statusCode = http.StatusInternalServerError
+			}
+			http.Error(w, appErr.Error(), statusCode)
 			return
 		}
 

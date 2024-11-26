@@ -7,7 +7,6 @@ import (
 	"gator-swamp/internal/models" // Models for Subreddits and Posts
 	"gator-swamp/internal/utils"  // Utility functions and error handling
 	"log"
-	"sort"
 	"time" // Time utilities
 
 	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
@@ -76,21 +75,6 @@ type GetSubredditDetailsMsg struct {
 // GetSubredditMsg retrieves a subreddit by name
 type GetSubredditMsg struct {
 	Name string // Name of the subreddit
-}
-
-// Message types for Post operations
-
-// CreatePostMsg represents a request to create a new post
-type CreatePostMsg struct {
-	Title       string    // Title of the post
-	Content     string    // Content of the post
-	AuthorID    uuid.UUID // ID of the author
-	SubredditID uuid.UUID // ID of the subreddit
-}
-
-// GetPostMsg retrieves a post by its ID
-type GetPostMsg struct {
-	PostID uuid.UUID // ID of the post
 }
 
 // GetSubredditPostsMsg retrieves all posts in a subreddit
@@ -279,175 +263,6 @@ func (a *SubredditActor) Receive(context actor.Context) {
 	}
 }
 
-// PostActor handles post-related operations
-// Update PostActor to include voting and karma
-type PostActor struct {
-	postsByID      map[uuid.UUID]*models.Post
-	subredditPosts map[uuid.UUID][]uuid.UUID
-	postVotes      map[uuid.UUID]map[uuid.UUID]bool // PostID -> UserID -> IsUpvote
-	metrics        *utils.MetricsCollector
-}
-
-// Constructor for PostActor
-func NewPostActor(metrics *utils.MetricsCollector) actor.Actor {
-	return &PostActor{
-		postsByID:      make(map[uuid.UUID]*models.Post), // Initialize post storage
-		subredditPosts: make(map[uuid.UUID][]uuid.UUID),  // Initialize subreddit post mapping
-		metrics:        metrics,                          // Initialize metrics collector
-	}
-}
-
-// Receive method processes incoming messages related to posts
-func (a *PostActor) Receive(context actor.Context) {
-	switch msg := context.Message().(type) {
-
-	case *CreatePostMsg:
-		// Handle post creation
-		startTime := time.Now()
-
-		// Create a new post object
-		newPost := &models.Post{
-			ID:          uuid.New(),
-			Title:       msg.Title,
-			Content:     msg.Content,
-			AuthorID:    msg.AuthorID,
-			SubredditID: msg.SubredditID,
-			CreatedAt:   time.Now(),
-		}
-
-		// Store the post and update the subreddit-post mapping
-		a.postsByID[newPost.ID] = newPost
-		a.subredditPosts[msg.SubredditID] = append(a.subredditPosts[msg.SubredditID], newPost.ID)
-
-		// Log the operation latency and respond with the created post
-		a.metrics.AddOperationLatency("create_post", time.Since(startTime))
-		context.Respond(newPost)
-
-	case *GetPostMsg:
-		// Handle post retrieval by ID
-		if post, exists := a.postsByID[msg.PostID]; exists {
-			context.Respond(post)
-		} else {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "post not found", nil))
-		}
-
-	case *GetSubredditPostsMsg:
-		// Handle retrieval of all posts in a subreddit
-		if postIDs, exists := a.subredditPosts[msg.SubredditID]; exists {
-			posts := make([]*models.Post, 0, len(postIDs))
-			for _, postID := range postIDs {
-				posts = append(posts, a.postsByID[postID])
-			}
-			context.Respond(posts)
-		} else {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found or has no posts", nil))
-		}
-
-	case *VotePostMsg:
-		startTime := time.Now()
-		post, exists := a.postsByID[msg.PostID]
-		if !exists {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "Post not found", nil))
-			return
-		}
-
-		// Initialize vote map for this post if it doesn't exist
-		if _, exists := a.postVotes[msg.PostID]; !exists {
-			a.postVotes[msg.PostID] = make(map[uuid.UUID]bool)
-		}
-
-		// Check previous vote
-		previousVote, hasVoted := a.postVotes[msg.PostID][msg.UserID]
-
-		// Calculate karma change
-		karmaChange := 0
-		if hasVoted {
-			if previousVote != msg.IsUpvote {
-				// Changing vote from down to up or up to down
-				if msg.IsUpvote {
-					karmaChange = 2
-				} else {
-					karmaChange = -2
-				}
-			}
-		} else {
-			// New vote
-			if msg.IsUpvote {
-				karmaChange = 1
-			} else {
-				karmaChange = -1
-			}
-		}
-
-		// Update vote record and post karma
-		a.postVotes[msg.PostID][msg.UserID] = msg.IsUpvote
-		post.Karma += karmaChange
-
-		// Update author's karma
-		context.Send(context.Parent(), &actors.UpdateKarmaMsg{
-			UserID: post.AuthorID,
-			Delta:  karmaChange,
-		})
-
-		a.metrics.AddOperationLatency("vote_post", time.Since(startTime))
-		context.Respond(post)
-
-	case *GetUserFeedMsg:
-		startTime := time.Now()
-
-		// Get user's subscribed subreddits through Engine
-		future := context.RequestFuture(
-			context.Parent(), // Request to Engine
-			&actors.GetUserProfileMsg{UserID: msg.UserID},
-			5*time.Second,
-		)
-		result, err := future.Result()
-		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to get user profile", err))
-			return
-		}
-
-		userProfile, ok := result.(*actors.UserState)
-		if !ok || userProfile == nil {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", nil))
-			return
-		}
-
-		// Rest of the code remains the same
-		var feedPosts []*models.Post
-		for _, subredditID := range userProfile.Subscriptions {
-			if postIDs, exists := a.subredditPosts[subredditID]; exists {
-				for _, postID := range postIDs {
-					if post, exists := a.postsByID[postID]; exists {
-						feedPosts = append(feedPosts, post)
-					}
-				}
-			}
-		}
-
-		// Sort posts by karma and time (simple hot algorithm)
-		sort.Slice(feedPosts, func(i, j int) bool {
-			timeI := time.Since(feedPosts[i].CreatedAt).Hours()
-			timeJ := time.Since(feedPosts[j].CreatedAt).Hours()
-			scoreI := float64(feedPosts[i].Karma) / (timeI + 2.0)
-			scoreJ := float64(feedPosts[j].Karma) / (timeJ + 2.0)
-			return scoreI > scoreJ
-		})
-
-		// Apply limit if specified
-		if msg.Limit > 0 && len(feedPosts) > msg.Limit {
-			feedPosts = feedPosts[:msg.Limit]
-		}
-
-		a.metrics.AddOperationLatency("get_feed", time.Since(startTime))
-		context.Respond(feedPosts)
-
-	case *GetCountsMsg:
-		count := len(a.postsByID)
-		context.Respond(count)
-	}
-}
-
 // Engine coordinates communication between actors
 type Engine struct {
 	subredditActor *actor.PID
@@ -480,10 +295,10 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector) *Engi
 	subredditPID := context.Spawn(subredditProps)
 	log.Printf("SubredditActor PID: %v", subredditPID)
 
-	// Spawn PostActor
+	// Spawn PostActor from actors package
 	postProps := actor.PropsFromProducer(func() actor.Actor {
 		log.Printf("Creating PostActor")
-		return NewPostActor(metrics)
+		return actors.NewPostActor(metrics)
 	})
 	postPID := context.Spawn(postProps)
 	log.Printf("PostActor PID: %v", postPID)
@@ -541,8 +356,7 @@ func (e *Engine) Receive(context actor.Context) {
 			return
 		}
 
-		// 3. Forward to SubredditActor for creation
-		log.Printf("Engine: User validated, forwarding to SubredditActor")
+		// Only proceed if user exists and has enough karma
 		future := context.RequestFuture(e.subredditActor, msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
@@ -555,7 +369,7 @@ func (e *Engine) Receive(context actor.Context) {
 		log.Printf("Engine: Subreddit creation completed")
 		context.Respond(result)
 
-	case *CreatePostMsg:
+	case *actors.CreatePostMsg: // This comes from actors package now
 		// First validate user is member of subreddit
 		memberFuture := context.RequestFuture(e.subredditActor,
 			&GetSubredditMembersMsg{SubredditID: msg.SubredditID},
@@ -573,6 +387,7 @@ func (e *Engine) Receive(context actor.Context) {
 			return
 		}
 
+		// Check if user is a member
 		isMember := false
 		for _, memberID := range members {
 			if memberID == msg.AuthorID {
@@ -586,11 +401,32 @@ func (e *Engine) Receive(context actor.Context) {
 			return
 		}
 
-		// Then forward to PostActor
+		// After validation, forward to PostActor
 		future := context.RequestFuture(e.postActor, msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
 			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to create post", err))
+			return
+		}
+		context.Respond(result)
+
+	case *actors.VotePostMsg:
+		// Validate user exists before allowing vote
+		userFuture := context.RequestFuture(e.userSupervisor,
+			&actors.GetUserProfileMsg{UserID: msg.UserID},
+			5*time.Second)
+
+		_, err := userFuture.Result()
+		if err != nil {
+			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to validate user", err))
+			return
+		}
+
+		// Forward to PostActor
+		future := context.RequestFuture(e.postActor, msg, 5*time.Second)
+		result, err := future.Result()
+		if err != nil {
+			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process vote", err))
 			return
 		}
 		context.Respond(result)
@@ -605,29 +441,7 @@ func (e *Engine) Receive(context actor.Context) {
 		}
 		context.Respond(result)
 
-	case *VotePostMsg:
-		// First validate user exists
-		userFuture := context.RequestFuture(e.userSupervisor,
-			&actors.GetUserProfileMsg{UserID: msg.UserID},
-			5*time.Second)
-
-		_, err := userFuture.Result()
-		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to validate user", err))
-			return
-		}
-
-		// Then forward to PostActor
-		future := context.RequestFuture(e.postActor, msg, 5*time.Second)
-		result, err := future.Result()
-		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process vote", err))
-			return
-		}
-		context.Respond(result)
-
 	default:
-		// Forward unknown messages to appropriate actor based on message type
 		switch {
 		case isSubredditMessage(msg):
 			future := context.RequestFuture(e.subredditActor, msg, 5*time.Second)
@@ -638,20 +452,20 @@ func (e *Engine) Receive(context actor.Context) {
 			}
 			context.Respond(result)
 
-		case isPostMessage(msg):
-			future := context.RequestFuture(e.postActor, msg, 5*time.Second)
-			result, err := future.Result()
-			if err != nil {
-				context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process post request", err))
-				return
-			}
-			context.Respond(result)
-
 		case isUserMessage(msg):
 			future := context.RequestFuture(e.userSupervisor, msg, 5*time.Second)
 			result, err := future.Result()
 			if err != nil {
 				context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process user request", err))
+				return
+			}
+			context.Respond(result)
+
+		case isPostMessage(msg): // Using IsPostMessage from actors package
+			future := context.RequestFuture(e.postActor, msg, 5*time.Second)
+			result, err := future.Result()
+			if err != nil {
+				context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to process post request", err))
 				return
 			}
 			context.Respond(result)
@@ -677,17 +491,13 @@ func (e *Engine) GetPostActor() *actor.PID {
 // Helper functions to identify message types
 func isSubredditMessage(msg interface{}) bool {
 	switch msg.(type) {
-	case *CreateSubredditMsg, *JoinSubredditMsg, *LeaveSubredditMsg,
-		*ListSubredditsMsg, *GetSubredditMembersMsg, *GetSubredditDetailsMsg:
-		return true
-	default:
-		return false
-	}
-}
-
-func isPostMessage(msg interface{}) bool {
-	switch msg.(type) {
-	case *CreatePostMsg, *GetPostMsg, *GetSubredditPostsMsg, *VotePostMsg:
+	case *CreateSubredditMsg,
+		*JoinSubredditMsg,
+		*LeaveSubredditMsg,
+		*ListSubredditsMsg,
+		*GetSubredditMembersMsg,
+		*GetSubredditDetailsMsg,
+		*GetSubredditMsg:
 		return true
 	default:
 		return false
@@ -696,8 +506,24 @@ func isPostMessage(msg interface{}) bool {
 
 func isUserMessage(msg interface{}) bool {
 	switch msg.(type) {
-	case *actors.RegisterUserMsg, *actors.UpdateProfileMsg,
-		*actors.UpdateKarmaMsg, *actors.GetUserProfileMsg, *actors.LoginMsg:
+	case *actors.RegisterUserMsg,
+		*actors.UpdateProfileMsg,
+		*actors.UpdateKarmaMsg,
+		*actors.GetUserProfileMsg,
+		*actors.LoginMsg:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPostMessage(msg interface{}) bool {
+	switch msg.(type) {
+	case *actors.CreatePostMsg,
+		*actors.GetPostMsg,
+		*actors.GetSubredditPostsMsg,
+		*actors.VotePostMsg,
+		*actors.GetUserFeedMsg:
 		return true
 	default:
 		return false
