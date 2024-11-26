@@ -43,6 +43,20 @@ type SubredditResponse struct {
 	CreatedAt   time.Time `json:"createdAt"`   // Timestamp of creation
 }
 
+// Request/Response to create a comment
+type CreateCommentRequest struct {
+	Content  string `json:"content"`
+	AuthorID string `json:"authorId"`
+	PostID   string `json:"postId"`
+	ParentID string `json:"parentId,omitempty"` // Optional, for replies
+}
+
+type EditCommentRequest struct {
+	CommentID string `json:"commentId"`
+	AuthorID  string `json:"authorId"`
+	Content   string `json:"content"`
+}
+
 // Server holds all server dependencies, including the actor system and engine
 type Server struct {
 	system  *actor.ActorSystem
