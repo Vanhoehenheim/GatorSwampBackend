@@ -247,32 +247,113 @@ func (s *Server) handleSubreddits() http.HandlerFunc {
 // handleSubredditMembers handles requests to retrieve the members of a specific subreddit
 func (s *Server) handleSubredditMembers() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Get the subreddit ID from the query parameters
-		subredditID := r.URL.Query().Get("id")
-		if subredditID == "" {
-			http.Error(w, "Subreddit ID required", http.StatusBadRequest)
-			return
-		}
+		switch r.Method {
+		case http.MethodGet:
+			// Existing GET logic
+			subredditID := r.URL.Query().Get("id")
+			if subredditID == "" {
+				http.Error(w, "Subreddit ID required", http.StatusBadRequest)
+				return
+			}
 
-		// Convert subreddit ID to UUID
-		id, err := uuid.Parse(subredditID)
-		if err != nil {
-			http.Error(w, "Invalid subreddit ID", http.StatusBadRequest)
-			return
-		}
+			id, err := uuid.Parse(subredditID)
+			if err != nil {
+				http.Error(w, "Invalid subreddit ID", http.StatusBadRequest)
+				return
+			}
 
-		// Create message to get subreddit members
-		msg := &actors.GetSubredditMembersMsg{SubredditID: id}
-		future := s.context.RequestFuture(s.engine.GetSubredditActor(), msg, 5*time.Second)
-		result, err := future.Result()
-		if err != nil {
-			http.Error(w, "Failed to get members", http.StatusInternalServerError)
-			return
-		}
+			msg := &actors.GetSubredditMembersMsg{SubredditID: id}
+			future := s.context.RequestFuture(s.engine.GetSubredditActor(), msg, 5*time.Second)
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to get members", http.StatusInternalServerError)
+				return
+			}
 
-		// Respond with the list of subreddit members
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+
+		case http.MethodPost:
+			// New POST logic for joining
+			var req struct {
+				SubredditID string `json:"subredditId"`
+				UserID      string `json:"userId"`
+			}
+
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+
+			subredditID, err := uuid.Parse(req.SubredditID)
+			if err != nil {
+				http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
+				return
+			}
+
+			userID, err := uuid.Parse(req.UserID)
+			if err != nil {
+				http.Error(w, "Invalid user ID format", http.StatusBadRequest)
+				return
+			}
+
+			future := s.context.RequestFuture(s.engine.GetSubredditActor(),
+				&actors.JoinSubredditMsg{
+					SubredditID: subredditID,
+					UserID:      userID,
+				}, 5*time.Second)
+
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to join subreddit", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+
+		case http.MethodDelete:
+			// New DELETE logic for leaving
+			var req struct {
+				SubredditID string `json:"subredditId"`
+				UserID      string `json:"userId"`
+			}
+
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+
+			subredditID, err := uuid.Parse(req.SubredditID)
+			if err != nil {
+				http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
+				return
+			}
+
+			userID, err := uuid.Parse(req.UserID)
+			if err != nil {
+				http.Error(w, "Invalid user ID format", http.StatusBadRequest)
+				return
+			}
+
+			future := s.context.RequestFuture(s.engine.GetSubredditActor(),
+				&actors.LeaveSubredditMsg{
+					SubredditID: subredditID,
+					UserID:      userID,
+				}, 5*time.Second)
+
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to leave subreddit", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
 }
 
