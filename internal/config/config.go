@@ -15,3 +15,11 @@ func DefaultConfig() *ServerConfig {
 		MetricsEnabled: true,
 	}
 }
+
+type Config struct {
+	Host string
+	Port int
+	// Add these fields
+	AllowedOrigins []string
+	Debug          bool
+}

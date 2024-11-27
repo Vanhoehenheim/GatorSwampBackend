@@ -78,6 +78,14 @@ type (
 		PostID      uuid.UUID
 		SubredditID uuid.UUID
 	}
+
+	ConnectUserMsg struct {
+		UserID uuid.UUID
+	}
+
+	DisconnectUserMsg struct {
+		UserID uuid.UUID
+	}
 )
 
 // UserState represents the internal state
@@ -86,6 +94,8 @@ type UserState struct {
 	Username       string
 	Email          string
 	Karma          int
+	IsConnected    bool      // Add this
+	LastActive     time.Time // Add this
 	Posts          []uuid.UUID
 	Comments       []uuid.UUID
 	HashedPassword string
@@ -192,6 +202,8 @@ func NewUserActor(id uuid.UUID, msg *RegisterUserMsg) *UserActor {
 			Username:      msg.Username,
 			Email:         msg.Email,
 			Karma:         300,
+			IsConnected:   true,       // Add this
+			LastActive:    time.Now(), // Add this
 			Posts:         make([]uuid.UUID, 0),
 			Comments:      make([]uuid.UUID, 0),
 			VotedPosts:    make(map[uuid.UUID]bool),
@@ -317,5 +329,13 @@ func (a *UserActor) Receive(context actor.Context) {
 			}
 		}
 		context.Respond(false)
+	case *ConnectUserMsg:
+		a.state.IsConnected = true
+		a.state.LastActive = time.Now()
+		context.Respond(true)
+
+	case *DisconnectUserMsg:
+		a.state.IsConnected = false
+		context.Respond(true)
 	}
 }

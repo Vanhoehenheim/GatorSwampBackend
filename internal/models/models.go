@@ -7,10 +7,12 @@ import (
 )
 
 type User struct {
-	ID        uuid.UUID
-	Username  string
-	CreatedAt time.Time
-	Karma     int
+	ID          uuid.UUID
+	Username    string
+	CreatedAt   time.Time
+	Karma       int
+	IsConnected bool      // Add this field
+	LastActive  time.Time // Optional but useful for tracking activity
 }
 
 type Subreddit struct {

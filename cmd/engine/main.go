@@ -123,22 +123,37 @@ func main() {
 		return actors.NewCommentActor()
 	}))
 	// Set up HTTP endpoints
-	http.HandleFunc("/health", server.handleHealth())
-	http.HandleFunc("/subreddit", server.handleSubreddits())
-	http.HandleFunc("/subreddit/members", server.handleSubredditMembers())
-	http.HandleFunc("/post", server.handlePost())
-	http.HandleFunc("/user/register", server.handleUserRegistration())
-	http.HandleFunc("/user/login", server.handleUserLogin())
-	http.HandleFunc("/post/vote", server.handleVote())    // New endpoint
-	http.HandleFunc("/user/feed", server.handleGetFeed()) // New endpoint
-	http.HandleFunc("/user/profile", server.handleUserProfile())
-	http.HandleFunc("/comment", server.handleComment())              //Comment actor
-	http.HandleFunc("/comment/post", server.handleGetPostComments()) //Post comment actor
+	http.HandleFunc("/health", corsMiddleware(server.handleHealth()))
+	http.HandleFunc("/subreddit", corsMiddleware(server.handleSubreddits()))
+	http.HandleFunc("/subreddit/members", corsMiddleware(server.handleSubredditMembers()))
+	http.HandleFunc("/post", corsMiddleware(server.handlePost()))
+	http.HandleFunc("/user/register", corsMiddleware(server.handleUserRegistration()))
+	http.HandleFunc("/user/login", corsMiddleware(server.handleUserLogin()))
+	http.HandleFunc("/post/vote", corsMiddleware(server.handleVote()))
+	http.HandleFunc("/user/feed", corsMiddleware(server.handleGetFeed()))
+	http.HandleFunc("/user/profile", corsMiddleware(server.handleUserProfile()))
+	http.HandleFunc("/comment", corsMiddleware(server.handleComment()))
+	http.HandleFunc("/comment/post", corsMiddleware(server.handleGetPostComments()))
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
 	if err := http.ListenAndServe(serverAddr, nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
+	}
+}
+
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*") // For development
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
 	}
 }
 
@@ -360,15 +375,15 @@ func (s *Server) handleSubredditMembers() http.HandlerFunc {
 // handlePost handles post-related requests, such as creating a new post
 func (s *Server) handlePost() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			// Parse request to create a post
+		switch r.Method {
+		case http.MethodPost:
+			// Existing post creation logic
 			var req CreatePostRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "Invalid request", http.StatusBadRequest)
 				return
 			}
 
-			// Convert AuthorID and SubredditID to UUIDs and create post message
 			authorID, err := uuid.Parse(req.AuthorID)
 			if err != nil {
 				http.Error(w, "Invalid author ID format", http.StatusBadRequest)
@@ -386,19 +401,69 @@ func (s *Server) handlePost() http.HandlerFunc {
 				SubredditID: subredditID,
 			}, 5*time.Second)
 
-			// Handle the response from the actor
 			result, err := future.Result()
 			if err != nil {
 				http.Error(w, "Failed to create post", http.StatusInternalServerError)
 				return
 			}
 
-			// Respond with the created post details
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(result)
 
-		} else {
-			// Handle unsupported HTTP methods
+		case http.MethodGet:
+			// Handle getting a specific post or list of posts
+			postID := r.URL.Query().Get("id")
+			subredditID := r.URL.Query().Get("subredditId")
+
+			if postID != "" {
+				// Get specific post
+				id, err := uuid.Parse(postID)
+				if err != nil {
+					http.Error(w, "Invalid post ID format", http.StatusBadRequest)
+					return
+				}
+
+				future := s.context.RequestFuture(s.engine.GetPostActor(),
+					&actors.GetPostMsg{PostID: id},
+					5*time.Second)
+
+				result, err := future.Result()
+				if err != nil {
+					http.Error(w, "Failed to get post", http.StatusInternalServerError)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(result)
+				return
+			}
+
+			if subredditID != "" {
+				// Get posts for a specific subreddit
+				id, err := uuid.Parse(subredditID)
+				if err != nil {
+					http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
+					return
+				}
+
+				future := s.context.RequestFuture(s.engine.GetPostActor(),
+					&actors.GetSubredditPostsMsg{SubredditID: id},
+					5*time.Second)
+
+				result, err := future.Result()
+				if err != nil {
+					http.Error(w, "Failed to get subreddit posts", http.StatusInternalServerError)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(result)
+				return
+			}
+
+			http.Error(w, "Either post ID or subreddit ID is required", http.StatusBadRequest)
+
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}
