@@ -11,7 +11,7 @@ import (
 func main() {
 	// Define simulation configuration
 	config := simulator.SimConfig{
-		NumUsers:         100,
+		NumUsers:         10,
 		NumSubreddits:    5,
 		SimulationTime:   10 * time.Minute,
 		PostFrequency:    100.0,

@@ -46,15 +46,16 @@ type (
 // SubredditActor handles all subreddit-related operations
 type SubredditActor struct {
 	subredditsByName map[string]*models.Subreddit
+	subredditsById   map[uuid.UUID]*models.Subreddit // Add this map
 	subredditMembers map[uuid.UUID]map[uuid.UUID]bool
 	metrics          *utils.MetricsCollector
 	context          actor.Context
 }
 
-// NewSubredditActor creates a new SubredditActor instance
 func NewSubredditActor(metrics *utils.MetricsCollector) actor.Actor {
 	return &SubredditActor{
 		subredditsByName: make(map[string]*models.Subreddit),
+		subredditsById:   make(map[uuid.UUID]*models.Subreddit), // Initialize the new map
 		subredditMembers: make(map[uuid.UUID]map[uuid.UUID]bool),
 		metrics:          metrics,
 	}
@@ -121,7 +122,9 @@ func (a *SubredditActor) handleCreateSubreddit(context actor.Context, msg *Creat
 		Members:     1,
 	}
 
+	// Store in both maps
 	a.subredditsByName[msg.Name] = newSubreddit
+	a.subredditsById[newSubreddit.ID] = newSubreddit
 	a.subredditMembers[newSubreddit.ID] = map[uuid.UUID]bool{
 		msg.CreatorID: true,
 	}
@@ -142,15 +145,8 @@ func (a *SubredditActor) handleGetSubreddit(context actor.Context, msg *GetSubre
 func (a *SubredditActor) handleJoinSubreddit(context actor.Context, msg *JoinSubredditMsg) {
 	startTime := time.Now()
 
-	var subreddit *models.Subreddit
-	for _, s := range a.subredditsByName {
-		if s.ID == msg.SubredditID {
-			subreddit = s
-			break
-		}
-	}
-
-	if subreddit == nil {
+	subreddit, exists := a.subredditsById[msg.SubredditID]
+	if !exists {
 		context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 		return
 	}
@@ -161,10 +157,10 @@ func (a *SubredditActor) handleJoinSubreddit(context actor.Context, msg *JoinSub
 	a.subredditMembers[msg.SubredditID][msg.UserID] = true
 	subreddit.Members++
 
+	log.Printf("SubredditActor: User %s joined subreddit %s", msg.UserID, msg.SubredditID)
 	a.metrics.AddOperationLatency("join_subreddit", time.Since(startTime))
 	context.Respond(true)
 }
-
 func (a *SubredditActor) handleLeaveSubreddit(context actor.Context, msg *LeaveSubredditMsg) {
 	startTime := time.Now()
 

@@ -119,6 +119,8 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		Downvotes:   0,
 		Karma:       0,
 	}
+	// create a print statement to print the new post
+	log.Printf("PostActor: Creating new post: %s in subreddit : %s", newPost.ID, newPost.SubredditID)
 
 	a.postsByID[newPost.ID] = newPost
 	a.postVotes[newPost.ID] = make(map[uuid.UUID]voteStatus)

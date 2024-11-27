@@ -396,6 +396,8 @@ func getRandomTheme() string {
 }
 
 func (s *EnhancedSimulator) simulateSubredditJoins(ctx context.Context) error {
+	log.Printf("Simulating subreddit joins...")
+
 	// Calculate popularity distribution using Zipf's law
 	subredditPopularity := make([]int, len(s.subreddits))
 	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -405,6 +407,8 @@ func (s *EnhancedSimulator) simulateSubredditJoins(ctx context.Context) error {
 	for _, user := range s.users {
 		// Skip users who already created subreddits
 		if len(user.Subscriptions) > 0 {
+			log.Printf("Debug: User %s already has %d subscriptions, skipping",
+				user.Username, len(user.Subscriptions))
 			continue
 		}
 
@@ -421,16 +425,23 @@ func (s *EnhancedSimulator) simulateSubredditJoins(ctx context.Context) error {
 		// Join subreddits
 		for i := 0; i < numJoins && i < len(availableSubs); i++ {
 			subredditID := availableSubs[i]
+			log.Printf("Debug: Attempting to join user %s to subreddit %s",
+				user.Username, subredditID)
+
 			if err := s.joinSubreddit(ctx, user.ID, subredditID); err != nil {
 				log.Printf("Failed to join subreddit: %v", err)
 				continue
 			}
+
 			user.Subscriptions = append(user.Subscriptions, subredditID)
 			subredditPopularity[i]++
-		}
 
-		// Small delay between users
-		time.Sleep(50 * time.Millisecond)
+			log.Printf("Debug: Successfully joined user %s to subreddit %s. User now has %d subscriptions",
+				user.Username, subredditID, len(user.Subscriptions))
+
+			// Small delay between joins to prevent overwhelming the system
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 
 	// Log popularity statistics
@@ -671,6 +682,7 @@ func (s *EnhancedSimulator) joinSubreddit(ctx context.Context, userID, subreddit
 	if err != nil {
 		return fmt.Errorf("failed to join subreddit: %v", err)
 	}
+	log.Printf("Debug: Joined user %s to subreddit %s", userID, subredditID)
 
 	return nil
 }

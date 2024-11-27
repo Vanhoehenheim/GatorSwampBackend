@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"gator-swamp/internal/models"
 	"log"
 	"math/rand"
 	"sync"
@@ -12,13 +13,17 @@ import (
 	"github.com/google/uuid"
 )
 
+type ErrorResponse struct {
+	Code    string  `json:"Code"`
+	Message string  `json:"Message"`
+	Origin  *string `json:"Origin"`
+}
+
 func (s *EnhancedSimulator) SimulateActivities(ctx context.Context) error {
 	log.Printf("Starting activities simulation...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel() // Ensure the context is canceled after the simulation ends
-
-	log.Printf("Starting activities simulation...")
+	// Create a channel to signal when we have enough posts to start comments/votes
+	postsAvailable := make(chan struct{})
 
 	var wg sync.WaitGroup
 
@@ -26,36 +31,66 @@ func (s *EnhancedSimulator) SimulateActivities(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.simulatePosts(ctx)
+		s.simulatePosts(ctx, postsAvailable)
 	}()
 
-	// Start comment simulation
+	// Wait for some posts to be created before starting comments and votes
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.stats.mu.RLock()
+				if s.stats.TotalPosts >= 10 { // Wait for at least 10 posts
+					s.stats.mu.RUnlock()
+					close(postsAvailable)
+					return
+				}
+				s.stats.mu.RUnlock()
+			}
+		}
+	}()
+
+	// Start comment simulation after some posts are available
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.simulateComments(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-postsAvailable:
+			log.Printf("Starting comments after posts available...")
+			s.simulateComments(ctx)
+		}
 	}()
 
-	// Start vote simulation
+	// Start vote simulation after some posts are available
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.simulateVotes(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-postsAvailable:
+			log.Printf("Starting votes after posts available...")
+			s.simulateVotes(ctx)
+		}
 	}()
 
 	wg.Wait()
 	return nil
 }
 
-func (s *EnhancedSimulator) simulatePosts(ctx context.Context) {
+func (s *EnhancedSimulator) simulatePosts(ctx context.Context, postsAvailable chan struct{}) {
 	log.Printf("Starting post simulation...")
 
-	// For 100 posts/hour, we want approximately 2 posts per minute
-	tickInterval := 500 * time.Millisecond // Check every half second
+	tickInterval := 500 * time.Millisecond
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
-
-	log.Printf("Post simulation starting with tick interval: %v", tickInterval)
 
 	const numWorkers = 5
 	postJobs := make(chan *SimulatedUser, s.config.NumUsers)
@@ -70,29 +105,64 @@ func (s *EnhancedSimulator) simulatePosts(ctx context.Context) {
 					continue
 				}
 
-				// Calculate probability for this tick
-				// For 100 posts/hour across all users, with 2 ticks/second
-				// probability = (100/3600)/(2) = 0.014 per tick per user
 				if rand.Float64() < (s.config.PostFrequency/3600.0)/2.0 {
 					subredditID := user.Subscriptions[rand.Intn(len(user.Subscriptions))]
-					title := fmt.Sprintf("Post by %s at %d", user.Username, time.Now().Unix())
-					content := fmt.Sprintf("Content from %s: %s", user.Username, time.Now().Format(time.RFC3339))
 
-					data := map[string]interface{}{
-						"title":       title,
-						"content":     content,
+					// Ensure membership before posting
+					joinData := map[string]interface{}{
+						"subredditId": subredditID.String(),
+						"userId":      user.ID.String(),
+					}
+
+					// Try to join/rejoin the subreddit before posting
+					joinResp, err := s.makeRequest("POST", "/subreddit/members", joinData)
+					if err != nil {
+						log.Printf("Debug: Failed to verify subreddit membership: %v", err)
+						continue
+					}
+					log.Printf("Debug: Join response for user %s in subreddit %s: %s",
+						user.ID, subredditID, string(joinResp))
+
+					// Small delay after joining
+					time.Sleep(50 * time.Millisecond)
+
+					// Create the post
+					postData := map[string]interface{}{
+						"title":       fmt.Sprintf("Post by %s at %d", user.Username, time.Now().Unix()),
+						"content":     fmt.Sprintf("Content from %s: %s", user.Username, time.Now().Format(time.RFC3339)),
 						"authorId":    user.ID.String(),
 						"subredditId": subredditID.String(),
 					}
 
+					log.Printf("Debug: Creating post for user %s in subreddit %s with data: %+v",
+						user.ID, subredditID, postData)
+
 					start := time.Now()
-					if _, err := s.makeRequest("POST", "/post", data); err == nil {
-						s.stats.mu.Lock()
-						s.stats.TotalPosts++
-						s.stats.mu.Unlock()
-						log.Printf("Created post by user %s", user.Username)
+					resp, err := s.makeRequest("POST", "/post", postData)
+					if err != nil {
+						log.Printf("Debug: Error creating post: %v", err)
+						s.recordRequestMetrics(start, err)
+						continue
 					}
+					log.Printf("Debug: Post creation response: %s", string(resp))
+
+					s.stats.mu.Lock()
+					postCount := s.stats.TotalPosts + 1
+					s.stats.TotalPosts = postCount
+					s.stats.mu.Unlock()
+
+					log.Printf("Created post by user %s (Total: %d) in subreddit %s",
+						user.Username, postCount, subredditID)
 					s.recordRequestMetrics(start, nil)
+
+					// If we hit the threshold, signal that posts are available
+					if postCount == 10 {
+						select {
+						case <-postsAvailable: // Check if already closed
+						default:
+							close(postsAvailable)
+						}
+					}
 				}
 			}
 		}(i)
@@ -109,14 +179,16 @@ func (s *EnhancedSimulator) simulatePosts(ctx context.Context) {
 			s.mu.RLock()
 			for _, user := range s.users {
 				if user.IsConnected {
-					postJobs <- user
+					select {
+					case postJobs <- user:
+					default: // Don't block if channel is full
+					}
 				}
 			}
 			s.mu.RUnlock()
 		}
 	}
 }
-
 func (s *EnhancedSimulator) simulateComments(ctx context.Context) {
 	log.Printf("Starting comment simulation...")
 
@@ -140,6 +212,7 @@ func (s *EnhancedSimulator) simulateComments(ctx context.Context) {
 				if rand.Float64() < (s.config.CommentFrequency/3600.0)/2.0 {
 					postID, err := s.getRandomPostToComment(user)
 					if err != nil {
+						log.Printf("Debug: Worker %d failed to get random post: %v", workerID, err)
 						continue
 					}
 
@@ -150,11 +223,16 @@ func (s *EnhancedSimulator) simulateComments(ctx context.Context) {
 					}
 
 					start := time.Now()
-					if _, err := s.makeRequest("POST", "/comment", data); err == nil {
+					resp, err := s.makeRequest("POST", "/comment", data)
+					if err != nil {
+						log.Printf("Debug: Worker %d failed to create comment: %v", workerID, err)
+					} else {
 						s.stats.mu.Lock()
 						s.stats.TotalComments++
+						commentCount := s.stats.TotalComments
 						s.stats.mu.Unlock()
-						log.Printf("Created comment by user %s", user.Username)
+						log.Printf("Created comment by user %s (Total: %d)", user.Username, commentCount)
+						log.Printf("Debug: Comment response: %s", string(resp))
 					}
 					s.recordRequestMetrics(start, err)
 				}
@@ -162,6 +240,7 @@ func (s *EnhancedSimulator) simulateComments(ctx context.Context) {
 		}(i)
 	}
 
+	// Rest of the function remains the same
 	for {
 		select {
 		case <-ctx.Done():
@@ -172,7 +251,10 @@ func (s *EnhancedSimulator) simulateComments(ctx context.Context) {
 			s.mu.RLock()
 			for _, user := range s.users {
 				if user.IsConnected {
-					commentJobs <- user
+					select {
+					case commentJobs <- user:
+					default: // Don't block if channel is full
+					}
 				}
 			}
 			s.mu.RUnlock()
@@ -256,29 +338,48 @@ func (s *EnhancedSimulator) getRandomPostToComment(user *SimulatedUser) (uuid.UU
 		return uuid.Nil, fmt.Errorf("no subscriptions")
 	}
 
-	subredditID := user.Subscriptions[rand.Intn(len(user.Subscriptions))]
-	resp, err := s.makeRequest("GET", fmt.Sprintf("/post?subredditId=%s", subredditID), nil)
-	if err != nil {
-		return uuid.Nil, err
+	shuffledSubs := make([]uuid.UUID, len(user.Subscriptions))
+	copy(shuffledSubs, user.Subscriptions)
+	rand.Shuffle(len(shuffledSubs), func(i, j int) {
+		shuffledSubs[i], shuffledSubs[j] = shuffledSubs[j], shuffledSubs[i]
+	})
+
+	for _, subredditID := range shuffledSubs {
+		log.Printf("Debug: Fetching posts for subreddit %s", subredditID)
+
+		resp, err := s.makeRequest("GET", fmt.Sprintf("/post?subredditId=%s", subredditID), nil)
+		if err != nil {
+			log.Printf("Debug: Error making request: %v", err)
+			continue
+		}
+
+		// First try to parse as error response
+		var errorResp ErrorResponse
+		if err := json.Unmarshal(resp, &errorResp); err == nil && errorResp.Code == "NOT_FOUND" {
+			log.Printf("Debug: No posts found in subreddit %s", subredditID)
+			continue
+		}
+
+		// If it's not an error response, try to parse as array of posts
+		var posts []models.Post
+		if err := json.Unmarshal(resp, &posts); err != nil {
+			log.Printf("Debug: Error parsing posts: %v", err)
+			log.Printf("Debug: Raw API response: %s", string(resp))
+			continue
+		}
+
+		if len(posts) == 0 {
+			log.Printf("Debug: Empty posts array for subreddit %s", subredditID)
+			continue
+		}
+
+		// Select a random post
+		selectedPost := posts[rand.Intn(len(posts))]
+		log.Printf("Debug: Successfully found post %s to comment on", selectedPost.ID)
+		return selectedPost.ID, nil
 	}
 
-	var posts []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resp, &posts); err != nil {
-		return uuid.Nil, err
-	}
-
-	if len(posts) == 0 {
-		return uuid.Nil, fmt.Errorf("no posts found")
-	}
-
-	postID, err := uuid.Parse(posts[rand.Intn(len(posts))].ID)
-	if err != nil {
-		return uuid.Nil, err
-	}
-
-	return postID, nil
+	return uuid.Nil, fmt.Errorf("no posts found in any subscribed subreddits")
 }
 
 func (s *EnhancedSimulator) getRandomComment(postID uuid.UUID) (uuid.UUID, error) {
