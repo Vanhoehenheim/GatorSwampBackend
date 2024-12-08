@@ -1,0 +1,55 @@
+User 1: dbc3f210-8416-4fab-b3cb-1e6ac1589cdd
+User 2: ddf5e4af-2d12-4715-96fa-d1e48610a506
+
+# Create User 1 (Alice)
+curl -X POST http://localhost:8080/user/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "email": "alice@example.com",
+    "password": "password123",
+    "karma": 100
+  }'
+
+# Create User 2 (Bob)
+curl -X POST http://localhost:8080/user/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "bob",
+    "email": "bob@example.com",
+    "password": "password123",
+    "karma": 100
+  }'
+
+# Send message from Alice to Bob (replace USER_IDS with the IDs from registration responses)
+curl -X POST http://localhost:8080/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromId": "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd",
+    "toId": "ddf5e4af-2d12-4715-96fa-d1e48610a506",
+    "content": "Hello Bob! How are you?"
+  }'
+
+# Send message from Bob to Alice
+curl -X POST http://localhost:8080/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromId": "062f127d-d922-49ee-b2be-38c661d71eda",
+    "toId": "d532ee6a-36d1-4a09-9517-0206deb0f58b",
+    "content": "Hi Alice! Im doing great!"
+  }'
+
+# View conversation between Alice and Bob
+curl "http://localhost:8080/messages/conversation?user1=ALICE_USER_ID&user2=BOB_USER_ID"
+
+
+curl "http://localhost:8080/messages?userId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd"
+
+curl -X POST http://localhost:8080/messages/read \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messageId": "d5540a4c-097e-4ae0-86b4-b3260f088e96",
+    "userId": "ddf5e4af-2d12-4715-96fa-d1e48610a506"
+  }'
+
+  curl -X DELETE "http://localhost:8080/messages?messageId=d5540a4c-097e-4ae0-86b4-b3260f088e96&userId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd"

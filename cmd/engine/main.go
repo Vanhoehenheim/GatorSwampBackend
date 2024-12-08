@@ -21,9 +21,10 @@ import (
 
 // CreateSubredditRequest represents a request to create a new subreddit
 type CreateSubredditRequest struct {
-	Name        string `json:"name"`        // Subreddit name
-	Description string `json:"description"` // Subreddit description
-	CreatorID   string `json:"creatorId"`   // Creator ID (UUID as string)
+	Name               string `json:"name"`        // Subreddit name
+	Description        string `json:"description"` // Subreddit description
+	CreatorID          string `json:"creatorId"`   // Creator ID (UUID as string)
+	directMessageActor *actor.PID
 }
 
 // CreatePostRequest represents a request to create a new post
@@ -45,12 +46,14 @@ type SubredditResponse struct {
 
 // Server holds all server dependencies, including the actor system and engine
 type Server struct {
-	system       *actor.ActorSystem
-	context      *actor.RootContext
-	engine       *engine.Engine
-	enginePID    *actor.PID // Add this field
-	metrics      *utils.MetricsCollector
-	commentActor *actor.PID //Added comment actor
+	system             *actor.ActorSystem
+	context            *actor.RootContext
+	engine             *engine.Engine
+	enginePID          *actor.PID // Add this field
+	metrics            *utils.MetricsCollector
+	commentActor       *actor.PID //Added comment actor
+	directMessageActor *actor.PID
+
 	// Remove userActor field as we'll use engine.GetUserSupervisor()
 }
 
@@ -100,6 +103,11 @@ type EditCommentRequest struct {
 	AuthorID  string `json:"authorId"`
 	Content   string `json:"content"`
 }
+type SendMessageRequest struct {
+	FromID  string `json:"fromId"`
+	ToID    string `json:"toId"`
+	Content string `json:"content"`
+}
 
 func main() {
 	cfg := config.DefaultConfig()
@@ -122,6 +130,10 @@ func main() {
 	server.commentActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
 		return actors.NewCommentActor()
 	}))
+
+	server.directMessageActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
+		return actors.NewDirectMessageActor()
+	}))
 	// Set up HTTP endpoints
 	http.HandleFunc("/health", corsMiddleware(server.handleHealth()))
 	http.HandleFunc("/subreddit", corsMiddleware(server.handleSubreddits()))
@@ -134,6 +146,9 @@ func main() {
 	http.HandleFunc("/user/profile", corsMiddleware(server.handleUserProfile()))
 	http.HandleFunc("/comment", corsMiddleware(server.handleComment()))
 	http.HandleFunc("/comment/post", corsMiddleware(server.handleGetPostComments()))
+	http.HandleFunc("/messages", corsMiddleware(server.handleDirectMessages()))
+	http.HandleFunc("/messages/conversation", corsMiddleware(server.handleConversation()))
+	http.HandleFunc("/messages/read", corsMiddleware(server.handleMarkMessageRead()))
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
@@ -831,5 +846,198 @@ func (s *Server) handleGetPostComments() http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
+	}
+}
+
+func (s *Server) handleDirectMessages() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var req SendMessageRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+
+			fromID, err := uuid.Parse(req.FromID)
+			if err != nil {
+				http.Error(w, "Invalid sender ID", http.StatusBadRequest)
+				return
+			}
+
+			toID, err := uuid.Parse(req.ToID)
+			if err != nil {
+				http.Error(w, "Invalid recipient ID", http.StatusBadRequest)
+				return
+			}
+
+			msg := &actors.SendDirectMessageMsg{
+				FromID:  fromID,
+				ToID:    toID,
+				Content: req.Content,
+			}
+
+			future := s.context.RequestFuture(s.directMessageActor, msg, 5*time.Second)
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to send message", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+
+		case http.MethodGet:
+			userID := r.URL.Query().Get("userId")
+			if userID == "" {
+				http.Error(w, "User ID required", http.StatusBadRequest)
+				return
+			}
+
+			parsedID, err := uuid.Parse(userID)
+			if err != nil {
+				http.Error(w, "Invalid user ID", http.StatusBadRequest)
+				return
+			}
+
+			msg := &actors.GetUserMessagesMsg{UserID: parsedID}
+			future := s.context.RequestFuture(s.directMessageActor, msg, 5*time.Second)
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to get messages", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+
+		case http.MethodDelete:
+			messageID := r.URL.Query().Get("messageId")
+			userID := r.URL.Query().Get("userId")
+
+			if messageID == "" || userID == "" {
+				http.Error(w, "Message ID and User ID required", http.StatusBadRequest)
+				return
+			}
+
+			parsedMessageID, err := uuid.Parse(messageID)
+			if err != nil {
+				http.Error(w, "Invalid message ID", http.StatusBadRequest)
+				return
+			}
+
+			parsedUserID, err := uuid.Parse(userID)
+			if err != nil {
+				http.Error(w, "Invalid user ID", http.StatusBadRequest)
+				return
+			}
+
+			msg := &actors.DeleteMessageMsg{
+				MessageID: parsedMessageID,
+				UserID:    parsedUserID,
+			}
+
+			future := s.context.RequestFuture(s.directMessageActor, msg, 5*time.Second)
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to delete message", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]bool{"success": result.(bool)})
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func (s *Server) handleConversation() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		user1ID := r.URL.Query().Get("user1")
+		user2ID := r.URL.Query().Get("user2")
+		if user1ID == "" || user2ID == "" {
+			http.Error(w, "Both user IDs required", http.StatusBadRequest)
+			return
+		}
+
+		parsedUser1ID, err := uuid.Parse(user1ID)
+		if err != nil {
+			http.Error(w, "Invalid user1 ID", http.StatusBadRequest)
+			return
+		}
+
+		parsedUser2ID, err := uuid.Parse(user2ID)
+		if err != nil {
+			http.Error(w, "Invalid user2 ID", http.StatusBadRequest)
+			return
+		}
+
+		msg := &actors.GetConversationMsg{
+			UserID1: parsedUser1ID,
+			UserID2: parsedUser2ID,
+		}
+
+		future := s.context.RequestFuture(s.directMessageActor, msg, 5*time.Second)
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to get conversation", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+func (s *Server) handleMarkMessageRead() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			MessageID string `json:"messageId"`
+			UserID    string `json:"userId"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		messageID, err := uuid.Parse(req.MessageID)
+		if err != nil {
+			http.Error(w, "Invalid message ID", http.StatusBadRequest)
+			return
+		}
+
+		userID, err := uuid.Parse(req.UserID)
+		if err != nil {
+			http.Error(w, "Invalid user ID", http.StatusBadRequest)
+			return
+		}
+
+		msg := &actors.MarkMessageReadMsg{
+			MessageID: messageID,
+			UserID:    userID,
+		}
+
+		future := s.context.RequestFuture(s.directMessageActor, msg, 5*time.Second)
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to mark message as read", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"success": result.(bool)})
 	}
 }
