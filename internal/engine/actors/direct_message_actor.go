@@ -1,6 +1,7 @@
 package actors
 
 import (
+	"gator-swamp/internal/database"
 	"log"
 	"time"
 
@@ -49,14 +50,16 @@ type DirectMessage struct {
 
 // DirectMessageActor manages direct messaging operations
 type DirectMessageActor struct {
-	messages     map[uuid.UUID]*DirectMessage                 // MessageID -> Message
-	userMessages map[uuid.UUID]map[uuid.UUID][]*DirectMessage // UserID -> OtherUserID -> Messages
+	messages     map[uuid.UUID]*DirectMessage
+	userMessages map[uuid.UUID]map[uuid.UUID][]*DirectMessage
+	mongodb      *database.MongoDB
 }
 
-func NewDirectMessageActor() *DirectMessageActor {
+func NewDirectMessageActor(mongodb *database.MongoDB) actor.Actor {
 	return &DirectMessageActor{
 		messages:     make(map[uuid.UUID]*DirectMessage),
 		userMessages: make(map[uuid.UUID]map[uuid.UUID][]*DirectMessage),
+		mongodb:      mongodb,
 	}
 }
 

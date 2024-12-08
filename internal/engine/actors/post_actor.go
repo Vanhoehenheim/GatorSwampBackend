@@ -1,6 +1,7 @@
 package actors
 
 import (
+	"gator-swamp/internal/database"
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils" // Add this for UpdateKarmaMsg
 	"log"
@@ -59,17 +60,19 @@ type PostActor struct {
 	subredditPosts map[uuid.UUID][]uuid.UUID
 	postVotes      map[uuid.UUID]map[uuid.UUID]voteStatus
 	metrics        *utils.MetricsCollector
-	enginePID      *actor.PID // Add this field
+	enginePID      *actor.PID
+	mongodb        *database.MongoDB
 }
 
 // NewPostActor creates a new PostActor instance
-func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID) actor.Actor {
+func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID, mongodb *database.MongoDB) actor.Actor {
 	return &PostActor{
 		postsByID:      make(map[uuid.UUID]*models.Post),
 		subredditPosts: make(map[uuid.UUID][]uuid.UUID),
 		postVotes:      make(map[uuid.UUID]map[uuid.UUID]voteStatus),
 		metrics:        metrics,
 		enginePID:      enginePID,
+		mongodb:        mongodb,
 	}
 }
 

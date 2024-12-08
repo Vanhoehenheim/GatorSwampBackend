@@ -2,9 +2,11 @@ package main
 
 // Import necessary packages
 import (
-	"encoding/json"                      // JSON encoding and decoding
-	"fmt"                                // String formatting
-	"gator-swamp/internal/config"        // Configuration handling
+	"context"
+	"encoding/json"               // JSON encoding and decoding
+	"fmt"                         // String formatting
+	"gator-swamp/internal/config" // Configuration handling
+	"gator-swamp/internal/database"
 	"gator-swamp/internal/engine"        // Engine for managing actors
 	"gator-swamp/internal/engine/actors" // For UserActors, SubredditActors, and PostActors
 	"gator-swamp/internal/utils"         // Utility functions and metrics
@@ -53,6 +55,7 @@ type Server struct {
 	metrics            *utils.MetricsCollector
 	commentActor       *actor.PID //Added comment actor
 	directMessageActor *actor.PID
+	mongodb            *database.MongoDB // Add MongoDB to server struct
 
 	// Remove userActor field as we'll use engine.GetUserSupervisor()
 }
@@ -110,10 +113,22 @@ type SendMessageRequest struct {
 }
 
 func main() {
+	// Initialize MongoDB
+	mongoURI := "mongodb+srv://panangadanprajay:golangReddit123!@cluster0.wpgh3.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+	mongodb, err := database.NewMongoDB(mongoURI)
+	if err != nil {
+		log.Fatalf("Failed to connect to MongoDB: %v", err)
+	}
+	defer func() {
+		if err := mongodb.Close(context.Background()); err != nil {
+			log.Printf("Error closing MongoDB connection: %v", err)
+		}
+	}()
 	cfg := config.DefaultConfig()
 	metrics := utils.NewMetricsCollector()
 	system := actor.NewActorSystem()
-	gatorEngine := engine.NewEngine(system, metrics)
+	// Pass mongodb to engine
+	gatorEngine := engine.NewEngine(system, metrics, mongodb)
 	engineProps := actor.PropsFromProducer(func() actor.Actor {
 		return gatorEngine
 	})
@@ -123,16 +138,17 @@ func main() {
 		system:    system,
 		context:   system.Root,
 		engine:    gatorEngine,
-		enginePID: enginePID, // Store the PID
+		enginePID: enginePID,
 		metrics:   metrics,
+		mongodb:   mongodb, // Add MongoDB to server struct
 	}
-	// Initialize comment actor
+	// Initialize actors with MongoDB
 	server.commentActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewCommentActor(enginePID)
+		return actors.NewCommentActor(enginePID, mongodb)
 	}))
 
 	server.directMessageActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewDirectMessageActor()
+		return actors.NewDirectMessageActor(mongodb)
 	}))
 	// Set up HTTP endpoints
 	http.HandleFunc("/health", corsMiddleware(server.handleHealth()))

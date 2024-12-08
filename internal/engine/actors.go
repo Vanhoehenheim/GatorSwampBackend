@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"gator-swamp/internal/database"
 	"gator-swamp/internal/engine/actors"
 	"gator-swamp/internal/utils"
 	"log"
@@ -40,10 +41,11 @@ type Engine struct {
 	userSupervisor *actor.PID
 	context        *actor.RootContext
 	metrics        *utils.MetricsCollector
+	mongodb        *database.MongoDB // Add MongoDB field
 }
 
 // NewEngine creates a new engine instance with all required actors
-func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector) *Engine {
+func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector, mongodb *database.MongoDB) *Engine {
 	context := system.Root
 	log.Printf("Creating Engine with actors...")
 
@@ -51,6 +53,7 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector) *Engi
 	e := &Engine{
 		context: context,
 		metrics: metrics,
+		mongodb: mongodb,
 	}
 
 	// Create props with Engine's PID
@@ -61,15 +64,15 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector) *Engi
 
 	// Now create other actors with enginePID
 	supervisorProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewUserSupervisor()
+		return actors.NewUserSupervisor(e.mongodb)
 	})
 
 	subredditProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewSubredditActor(metrics)
+		return actors.NewSubredditActor(metrics, e.mongodb)
 	})
 
 	postProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewPostActor(metrics, enginePID)
+		return actors.NewPostActor(metrics, enginePID, e.mongodb)
 	})
 
 	userSupervisorPID := context.Spawn(supervisorProps)
@@ -294,4 +297,8 @@ func (e *Engine) GetSubredditActor() *actor.PID {
 
 func (e *Engine) GetPostActor() *actor.PID {
 	return e.postActor
+}
+
+func (e *Engine) GetMongoDB() *database.MongoDB {
+	return e.mongodb
 }

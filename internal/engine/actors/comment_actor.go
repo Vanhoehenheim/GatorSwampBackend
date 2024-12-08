@@ -1,6 +1,7 @@
 package actors
 
 import (
+	"gator-swamp/internal/database"
 	"gator-swamp/internal/utils"
 	"time"
 
@@ -69,14 +70,16 @@ type CommentActor struct {
 	postComments map[uuid.UUID][]uuid.UUID
 	commentVotes map[uuid.UUID]map[uuid.UUID]bool
 	enginePID    *actor.PID
+	mongodb      *database.MongoDB
 }
 
-func NewCommentActor(enginePID *actor.PID) *CommentActor {
+func NewCommentActor(enginePID *actor.PID, mongodb *database.MongoDB) actor.Actor {
 	return &CommentActor{
 		comments:     make(map[uuid.UUID]*Comment),
 		postComments: make(map[uuid.UUID][]uuid.UUID),
 		commentVotes: make(map[uuid.UUID]map[uuid.UUID]bool),
 		enginePID:    enginePID,
+		mongodb:      mongodb,
 	}
 }
 

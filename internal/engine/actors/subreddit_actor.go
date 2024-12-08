@@ -1,6 +1,7 @@
 package actors
 
 import (
+	"gator-swamp/internal/database"
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils"
 	"log"
@@ -46,18 +47,20 @@ type (
 // SubredditActor handles all subreddit-related operations
 type SubredditActor struct {
 	subredditsByName map[string]*models.Subreddit
-	subredditsById   map[uuid.UUID]*models.Subreddit // Add this map
+	subredditsById   map[uuid.UUID]*models.Subreddit
 	subredditMembers map[uuid.UUID]map[uuid.UUID]bool
 	metrics          *utils.MetricsCollector
 	context          actor.Context
+	mongodb          *database.MongoDB
 }
 
-func NewSubredditActor(metrics *utils.MetricsCollector) actor.Actor {
+func NewSubredditActor(metrics *utils.MetricsCollector, mongodb *database.MongoDB) actor.Actor {
 	return &SubredditActor{
 		subredditsByName: make(map[string]*models.Subreddit),
-		subredditsById:   make(map[uuid.UUID]*models.Subreddit), // Initialize the new map
+		subredditsById:   make(map[uuid.UUID]*models.Subreddit),
 		subredditMembers: make(map[uuid.UUID]map[uuid.UUID]bool),
 		metrics:          metrics,
+		mongodb:          mongodb,
 	}
 }
 

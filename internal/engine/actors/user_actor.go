@@ -3,6 +3,7 @@ package actors
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"gator-swamp/internal/database"
 	"gator-swamp/internal/utils"
 	"log"
 	"sync"
@@ -18,12 +19,14 @@ type UserSupervisor struct {
 	userActors map[uuid.UUID]*actor.PID
 	emailToID  map[string]uuid.UUID
 	mu         sync.RWMutex
+	mongodb    *database.MongoDB
 }
 
-func NewUserSupervisor() actor.Actor {
+func NewUserSupervisor(mongodb *database.MongoDB) actor.Actor {
 	return &UserSupervisor{
 		userActors: make(map[uuid.UUID]*actor.PID),
 		emailToID:  make(map[string]uuid.UUID),
+		mongodb:    mongodb,
 	}
 }
 
