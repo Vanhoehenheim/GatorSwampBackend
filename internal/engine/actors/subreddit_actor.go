@@ -1,6 +1,7 @@
 package actors
 
 import (
+	stdctx "context" // Import standard context package with alias to avoid confusion
 	"gator-swamp/internal/database"
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils"
@@ -107,12 +108,13 @@ func (a *SubredditActor) Receive(context actor.Context) {
 }
 
 // Handler functions for each message type
-func (a *SubredditActor) handleCreateSubreddit(context actor.Context, msg *CreateSubredditMsg) {
+func (a *SubredditActor) handleCreateSubreddit(ctx actor.Context, msg *CreateSubredditMsg) {
 	log.Printf("SubredditActor: Creating subreddit: %s", msg.Name)
 	startTime := time.Now()
 
+	// Check cache first
 	if _, exists := a.subredditsByName[msg.Name]; exists {
-		context.Respond(utils.NewAppError(utils.ErrDuplicate, "subreddit already exists", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrDuplicate, "subreddit already exists", nil))
 		return
 	}
 
@@ -125,7 +127,25 @@ func (a *SubredditActor) handleCreateSubreddit(context actor.Context, msg *Creat
 		Members:     1,
 	}
 
-	// Store in both maps
+	// Create a new context for MongoDB operations
+	dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create the subreddit in MongoDB
+	err := a.mongodb.CreateSubreddit(dbCtx, newSubreddit)
+	if err != nil {
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to create subreddit", err))
+		return
+	}
+
+	// Update the creator's subreddits list
+	err = a.mongodb.UpdateUserSubreddits(dbCtx, msg.CreatorID, newSubreddit.ID, true)
+	if err != nil {
+		log.Printf("Warning: Failed to update creator's subreddit list: %v", err)
+		// Don't fail the whole operation if this fails
+	}
+
+	// Store in local cache
 	a.subredditsByName[msg.Name] = newSubreddit
 	a.subredditsById[newSubreddit.ID] = newSubreddit
 	a.subredditMembers[newSubreddit.ID] = map[uuid.UUID]bool{
@@ -134,26 +154,58 @@ func (a *SubredditActor) handleCreateSubreddit(context actor.Context, msg *Creat
 
 	a.metrics.AddOperationLatency("create_subreddit", time.Since(startTime))
 	log.Printf("SubredditActor: Successfully created subreddit: %s", newSubreddit.ID)
-	context.Respond(newSubreddit)
+	ctx.Respond(newSubreddit)
 }
 
-func (a *SubredditActor) handleGetSubreddit(context actor.Context, msg *GetSubredditMsg) {
+func (a *SubredditActor) handleGetSubreddit(ctx actor.Context, msg *GetSubredditMsg) {
 	if subreddit, exists := a.subredditsByName[msg.Name]; exists {
-		context.Respond(subreddit)
+		ctx.Respond(subreddit)
 	} else {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 	}
 }
 
-func (a *SubredditActor) handleJoinSubreddit(context actor.Context, msg *JoinSubredditMsg) {
+func (a *SubredditActor) handleJoinSubreddit(ctx actor.Context, msg *JoinSubredditMsg) {
 	startTime := time.Now()
 
 	subreddit, exists := a.subredditsById[msg.SubredditID]
 	if !exists {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 		return
 	}
 
+	// Check if user is already a member
+	if members, exists := a.subredditMembers[msg.SubredditID]; exists {
+		if members[msg.UserID] {
+			ctx.Respond(utils.NewAppError(utils.ErrDuplicate, "user is already a member", nil))
+			return
+		}
+	}
+
+	dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
+
+	// Update MongoDB subreddit members count
+	err := a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, 1)
+	if err != nil {
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to update member count", err))
+		return
+	}
+
+	// Update user's subreddits list
+	err = a.mongodb.UpdateUserSubreddits(dbCtx, msg.UserID, msg.SubredditID, true)
+	if err != nil {
+		log.Printf("Warning: Failed to update user's subreddit list: %v", err)
+		// Rollback the member count update
+		rollbackErr := a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, -1)
+		if rollbackErr != nil {
+			log.Printf("Error rolling back member count: %v", rollbackErr)
+		}
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to update user's subreddit list", err))
+		return
+	}
+
+	// Update local cache
 	if _, exists := a.subredditMembers[msg.SubredditID]; !exists {
 		a.subredditMembers[msg.SubredditID] = make(map[uuid.UUID]bool)
 	}
@@ -162,58 +214,93 @@ func (a *SubredditActor) handleJoinSubreddit(context actor.Context, msg *JoinSub
 
 	log.Printf("SubredditActor: User %s joined subreddit %s", msg.UserID, msg.SubredditID)
 	a.metrics.AddOperationLatency("join_subreddit", time.Since(startTime))
-	context.Respond(true)
+	ctx.Respond(true)
 }
-func (a *SubredditActor) handleLeaveSubreddit(context actor.Context, msg *LeaveSubredditMsg) {
+
+func (a *SubredditActor) handleLeaveSubreddit(ctx actor.Context, msg *LeaveSubredditMsg) {
 	startTime := time.Now()
 
-	var subreddit *models.Subreddit
-	for _, s := range a.subredditsByName {
-		if s.ID == msg.SubredditID {
-			subreddit = s
-			break
-		}
-	}
-
+	subreddit := a.subredditsById[msg.SubredditID]
 	if subreddit == nil {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 		return
 	}
 
 	members := a.subredditMembers[msg.SubredditID]
 	if !members[msg.UserID] {
-		context.Respond(utils.NewAppError(utils.ErrInvalidInput, "user is not a member", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrInvalidInput, "user is not a member", nil))
 		return
 	}
 
+	dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
+
+	// Update MongoDB subreddit members count
+	err := a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, -1)
+	if err != nil {
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to update member count", err))
+		return
+	}
+
+	// Update user's subreddits list
+	err = a.mongodb.UpdateUserSubreddits(dbCtx, msg.UserID, msg.SubredditID, false)
+	if err != nil {
+		log.Printf("Warning: Failed to update user's subreddit list: %v", err)
+		// Rollback the member count update
+		rollbackErr := a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, 1)
+		if rollbackErr != nil {
+			log.Printf("Error rolling back member count: %v", rollbackErr)
+		}
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to update user's subreddit list", err))
+		return
+	}
+
+	// Update local cache
 	delete(a.subredditMembers[msg.SubredditID], msg.UserID)
 	subreddit.Members--
 
 	a.metrics.AddOperationLatency("leave_subreddit", time.Since(startTime))
-	context.Respond(true)
+	ctx.Respond(true)
 }
 
-func (a *SubredditActor) handleListSubreddits(context actor.Context) {
-	subreddits := make([]*models.Subreddit, 0, len(a.subredditsByName))
-	for _, sub := range a.subredditsByName {
-		subreddits = append(subreddits, sub)
+func (a *SubredditActor) handleListSubreddits(ctx actor.Context) {
+	dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get from MongoDB and update cache
+	subreddits, err := a.mongodb.ListSubreddits(dbCtx)
+	if err != nil {
+		// If MongoDB fails, fall back to cache
+		cachedSubreddits := make([]*models.Subreddit, 0, len(a.subredditsByName))
+		for _, sub := range a.subredditsByName {
+			cachedSubreddits = append(cachedSubreddits, sub)
+		}
+		ctx.Respond(cachedSubreddits)
+		return
 	}
-	context.Respond(subreddits)
+
+	// Update cache with MongoDB data
+	for _, sub := range subreddits {
+		a.subredditsByName[sub.Name] = sub
+		a.subredditsById[sub.ID] = sub
+	}
+
+	ctx.Respond(subreddits)
 }
 
-func (a *SubredditActor) handleGetMembers(context actor.Context, msg *GetSubredditMembersMsg) {
+func (a *SubredditActor) handleGetMembers(ctx actor.Context, msg *GetSubredditMembersMsg) {
 	if members, exists := a.subredditMembers[msg.SubredditID]; exists {
 		memberIDs := make([]uuid.UUID, 0, len(members))
 		for userID := range members {
 			memberIDs = append(memberIDs, userID)
 		}
-		context.Respond(memberIDs)
+		ctx.Respond(memberIDs)
 	} else {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 	}
 }
 
-func (a *SubredditActor) handleGetDetails(context actor.Context, msg *GetSubredditDetailsMsg) {
+func (a *SubredditActor) handleGetDetails(ctx actor.Context, msg *GetSubredditDetailsMsg) {
 	var subreddit *models.Subreddit
 	for _, s := range a.subredditsByName {
 		if s.ID == msg.SubredditID {
@@ -223,7 +310,7 @@ func (a *SubredditActor) handleGetDetails(context actor.Context, msg *GetSubredd
 	}
 
 	if subreddit == nil {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 		return
 	}
 
@@ -234,5 +321,5 @@ func (a *SubredditActor) handleGetDetails(context actor.Context, msg *GetSubredd
 		Subreddit:   subreddit,
 		MemberCount: len(a.subredditMembers[msg.SubredditID]),
 	}
-	context.Respond(details)
+	ctx.Respond(details)
 }

@@ -46,6 +46,8 @@ const (
 
 	// Rate limiting
 	ErrTooManyRequests = "TOO_MANY_REQUESTS"
+
+	ErrDatabase = "database_error"
 )
 
 // Error creation helper functions
