@@ -128,7 +128,7 @@ func main() {
 	}
 	// Initialize comment actor
 	server.commentActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewCommentActor()
+		return actors.NewCommentActor(enginePID)
 	}))
 
 	server.directMessageActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
@@ -149,6 +149,7 @@ func main() {
 	http.HandleFunc("/messages", corsMiddleware(server.handleDirectMessages()))
 	http.HandleFunc("/messages/conversation", corsMiddleware(server.handleConversation()))
 	http.HandleFunc("/messages/read", corsMiddleware(server.handleMarkMessageRead()))
+	http.HandleFunc("/comment/vote", corsMiddleware(server.handleCommentVote()))
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
@@ -1039,5 +1040,53 @@ func (s *Server) handleMarkMessageRead() http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"success": result.(bool)})
+	}
+}
+
+func (s *Server) handleCommentVote() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			CommentID string `json:"commentId"`
+			UserID    string `json:"userId"`
+			IsUpvote  bool   `json:"isUpvote"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		commentID, err := uuid.Parse(req.CommentID)
+		if err != nil {
+			http.Error(w, "Invalid comment ID", http.StatusBadRequest)
+			return
+		}
+
+		userID, err := uuid.Parse(req.UserID)
+		if err != nil {
+			http.Error(w, "Invalid user ID", http.StatusBadRequest)
+			return
+		}
+
+		msg := &actors.VoteCommentMsg{
+			CommentID: commentID,
+			UserID:    userID,
+			IsUpvote:  req.IsUpvote,
+		}
+
+		future := s.context.RequestFuture(s.commentActor, msg, 5*time.Second)
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to process vote", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
 	}
 }

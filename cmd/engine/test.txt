@@ -1,0 +1,67 @@
+# Create User 1
+curl -X POST http://localhost:8080/user/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "user1",
+    "email": "user1@example.com",
+    "password": "password123",
+    "karma": 300
+  }'
+
+# Create User 2
+curl -X POST http://localhost:8080/user/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "user2",
+    "email": "user2@example.com",
+    "password": "password123",
+    "karma": 300
+  }'
+
+# User 1 creates subreddit
+curl -X POST http://localhost:8080/subreddit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "testsubreddit",
+    "description": "A test subreddit",
+    "creatorId": "USER1_ID"
+  }'
+
+# User 2 joins the subreddit
+curl -X POST http://localhost:8080/subreddit/members \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subredditId": "SUBREDDIT_ID",
+    "userId": "USER2_ID"
+  }'
+
+# User 1 creates post
+curl -X POST http://localhost:8080/post \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Test Post",
+    "content": "This is a test post",
+    "authorId": "USER1_ID",
+    "subredditId": "SUBREDDIT_ID"
+  }'
+
+# User 1 comments on the post
+curl -X POST http://localhost:8080/comment \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "This is a test comment",
+    "authorId": "USER1_ID",
+    "postId": "POST_ID"
+  }'
+
+# User 2 upvotes the comment
+curl -X POST http://localhost:8080/comment/vote \
+  -H "Content-Type: application/json" \
+  -d '{
+    "commentId": "COMMENT_ID",
+    "userId": "USER2_ID",
+    "isUpvote": true
+  }'
+
+# Check User 1's karma after the upvote
+curl "http://localhost:8080/user/profile?userId=USER1_ID"
