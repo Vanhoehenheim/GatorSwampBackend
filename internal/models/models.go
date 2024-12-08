@@ -60,4 +60,5 @@ type DirectMessage struct {
 	Content   string
 	CreatedAt time.Time
 	IsRead    bool
+	IsDeleted bool
 }
