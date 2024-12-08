@@ -1,6 +1,7 @@
 package actors
 
 import (
+	stdctx "context"
 	"gator-swamp/internal/database"
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils" // Add this for UpdateKarmaMsg
@@ -122,8 +123,17 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		Downvotes:   0,
 		Karma:       0,
 	}
-	// create a print statement to print the new post
-	log.Printf("PostActor: Creating new post: %s in subreddit : %s", newPost.ID, newPost.SubredditID)
+
+	log.Printf("PostActor: Creating new post: %s in subreddit: %s", newPost.ID, newPost.SubredditID)
+
+	// Add post to the subreddit's posts array
+	ctx := stdctx.Background()
+	err := a.mongodb.UpdateSubredditPosts(ctx, msg.SubredditID, newPost.ID, true)
+	if err != nil {
+		log.Printf("PostActor: Failed to update subreddit posts: %v", err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update subreddit posts", err))
+		return
+	}
 
 	a.postsByID[newPost.ID] = newPost
 	a.postVotes[newPost.ID] = make(map[uuid.UUID]voteStatus)
@@ -132,7 +142,6 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 	a.metrics.AddOperationLatency("create_post", time.Since(startTime))
 	context.Respond(newPost)
 }
-
 func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
 	if post, exists := a.postsByID[msg.PostID]; exists {
 		context.Respond(post)

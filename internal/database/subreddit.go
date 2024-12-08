@@ -20,6 +20,7 @@ type SubredditDB struct {
 	CreatorID   string    `bson:"creatorId"`
 	Members     int       `bson:"members"`
 	CreatedAt   time.Time `bson:"createdAt"`
+	Posts       []string  `bson:"posts"`
 }
 
 // CreateSubreddit creates a new subreddit in MongoDB
@@ -31,6 +32,7 @@ func (m *MongoDB) CreateSubreddit(ctx context.Context, subreddit *models.Subredd
 		CreatorID:   subreddit.CreatorID.String(),
 		Members:     subreddit.Members,
 		CreatedAt:   subreddit.CreatedAt,
+		Posts:       make([]string, 0), // Initialize empty posts array
 	}
 
 	_, err := m.Subreddits.InsertOne(ctx, subredditDB)
@@ -60,6 +62,16 @@ func (m *MongoDB) GetSubredditByID(ctx context.Context, id uuid.UUID) (*models.S
 		return nil, fmt.Errorf("invalid creator ID in database: %v", err)
 	}
 
+	// Convert post IDs from strings to UUIDs
+	posts := make([]uuid.UUID, 0, len(subredditDB.Posts))
+	for _, postIDStr := range subredditDB.Posts {
+		postID, err := uuid.Parse(postIDStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid post ID in database: %v", err)
+		}
+		posts = append(posts, postID)
+	}
+
 	return &models.Subreddit{
 		ID:          id,
 		Name:        subredditDB.Name,
@@ -67,6 +79,7 @@ func (m *MongoDB) GetSubredditByID(ctx context.Context, id uuid.UUID) (*models.S
 		CreatorID:   creatorID,
 		Members:     subredditDB.Members,
 		CreatedAt:   subredditDB.CreatedAt,
+		Posts:       posts,
 	}, nil
 }
 
@@ -167,6 +180,27 @@ func (m *MongoDB) EnsureSubredditIndexes(ctx context.Context) error {
 
 	if err != nil {
 		return fmt.Errorf("failed to create name index: %v", err)
+	}
+
+	return nil
+}
+
+func (m *MongoDB) UpdateSubredditPosts(ctx context.Context, subredditID uuid.UUID, postID uuid.UUID, isAdding bool) error {
+	filter := bson.M{"_id": subredditID.String()}
+	var update bson.M
+
+	if isAdding {
+		update = bson.M{"$addToSet": bson.M{"posts": postID.String()}}
+	} else {
+		update = bson.M{"$pull": bson.M{"posts": postID.String()}}
+	}
+
+	result, err := m.Subreddits.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to update subreddit posts: %v", err)
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("subreddit not found")
 	}
 
 	return nil
