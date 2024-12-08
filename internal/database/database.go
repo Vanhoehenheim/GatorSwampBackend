@@ -34,7 +34,7 @@ func NewMongoDB(uri string) (*MongoDB, error) {
 	}
 
 	// Ping the database to verify connection
-	if err := client.Database("admin").RunCommand(ctx, bson.D{{"ping", 1}}).Err(); err != nil {
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Err(); err != nil {
 		return nil, fmt.Errorf("failed to ping MongoDB: %v", err)
 	}
 

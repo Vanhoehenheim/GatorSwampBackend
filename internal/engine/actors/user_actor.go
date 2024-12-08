@@ -4,10 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"gator-swamp/internal/database"
+	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils"
 	"log"
 	"sync"
 	"time"
+
+	stdctx "context"
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
@@ -30,7 +33,7 @@ func NewUserSupervisor(mongodb *database.MongoDB) actor.Actor {
 	}
 }
 
-// Message types for UserActor
+// Message types remain the same
 type (
 	RegisterUserMsg struct {
 		Username string
@@ -47,7 +50,7 @@ type (
 
 	UpdateKarmaMsg struct {
 		UserID uuid.UUID
-		Delta  int // Positive for upvote, negative for downvote
+		Delta  int
 	}
 
 	GetUserProfileMsg struct {
@@ -67,8 +70,8 @@ type (
 
 	VoteMsg struct {
 		UserID     uuid.UUID
-		TargetID   uuid.UUID // Post or Comment ID
-		TargetType string    // "post" or "comment"
+		TargetID   uuid.UUID
+		TargetType string
 		IsUpvote   bool
 	}
 
@@ -97,15 +100,15 @@ type UserState struct {
 	Username       string
 	Email          string
 	Karma          int
-	IsConnected    bool      // Add this
-	LastActive     time.Time // Add this
+	IsConnected    bool
+	LastActive     time.Time
 	Posts          []uuid.UUID
 	Comments       []uuid.UUID
 	HashedPassword string
 	AuthToken      string
-	Subscriptions  []uuid.UUID        // Subreddit IDs
-	VotedPosts     map[uuid.UUID]bool // PostID -> isUpvote
-	VotedComments  map[uuid.UUID]bool // CommentID -> isUpvote
+	Subreddits  []uuid.UUID
+	VotedPosts     map[uuid.UUID]bool
+	VotedComments  map[uuid.UUID]bool
 }
 
 func (s *UserSupervisor) Receive(context actor.Context) {
@@ -114,8 +117,11 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		// Check if email already exists
-		if _, exists := s.emailToID[msg.Email]; exists {
+		// Check if email exists in MongoDB first
+		ctx := stdctx.Background()
+		existingUser, _ := s.mongodb.GetUserByEmail(ctx, msg.Email)
+		if existingUser != nil {
+			log.Printf("Email already exists in MongoDB: %s", msg.Email)
 			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Email already registered", nil))
 			return
 		}
@@ -123,17 +129,17 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		// Create new user ID and actor
 		userID := uuid.New()
 		props := actor.PropsFromProducer(func() actor.Actor {
-			return NewUserActor(userID, msg)
+			return NewUserActor(userID, msg, s.mongodb)
 		})
 
 		pid := context.Spawn(props)
 		s.userActors[userID] = pid
 		s.emailToID[msg.Email] = userID
 
-		// Forward registration to new actor
 		future := context.RequestFuture(pid, msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
+			log.Printf("Failed to create user: %v", err)
 			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "User creation failed", err))
 			return
 		}
@@ -149,7 +155,6 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 			return
 		}
 
-		// Forward to specific user actor
 		future := context.RequestFuture(s.userActors[userID], msg, 5*time.Second)
 		result, err := future.Result()
 		if err != nil {
@@ -191,13 +196,13 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 	}
 }
 
-// UserActor manages user-related operations
 type UserActor struct {
-	id    uuid.UUID
-	state *UserState
+	id      uuid.UUID
+	state   *UserState
+	mongodb *database.MongoDB
 }
 
-func NewUserActor(id uuid.UUID, msg *RegisterUserMsg) *UserActor {
+func NewUserActor(id uuid.UUID, msg *RegisterUserMsg, mongodb *database.MongoDB) *UserActor {
 	return &UserActor{
 		id: id,
 		state: &UserState{
@@ -205,14 +210,15 @@ func NewUserActor(id uuid.UUID, msg *RegisterUserMsg) *UserActor {
 			Username:      msg.Username,
 			Email:         msg.Email,
 			Karma:         300,
-			IsConnected:   true,       // Add this
-			LastActive:    time.Now(), // Add this
+			IsConnected:   true,
+			LastActive:    time.Now(),
 			Posts:         make([]uuid.UUID, 0),
 			Comments:      make([]uuid.UUID, 0),
 			VotedPosts:    make(map[uuid.UUID]bool),
 			VotedComments: make(map[uuid.UUID]bool),
-			Subscriptions: make([]uuid.UUID, 0),
+			Subreddits: make([]uuid.UUID, 0),
 		},
+		mongodb: mongodb,
 	}
 }
 
@@ -236,7 +242,7 @@ func (a *UserActor) Receive(context actor.Context) {
 		// Hash password before storing
 		hashedPassword, err := hashPassword(msg.Password)
 		if err != nil {
-			context.Respond(nil)
+			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "Failed to hash password", err))
 			return
 		}
 
@@ -244,6 +250,30 @@ func (a *UserActor) Receive(context actor.Context) {
 		a.state.Email = msg.Email
 		a.state.HashedPassword = hashedPassword
 		a.state.Karma = 300
+		a.state.Subreddits = make([]uuid.UUID, 0)
+
+		// Create user model for MongoDB
+		user := &models.User{
+			ID:             a.state.ID,
+			Username:       a.state.Username,
+			Email:          a.state.Email,
+			HashedPassword: hashedPassword,
+			Karma:          a.state.Karma,
+			CreatedAt:      time.Now(),
+			LastActive:     time.Now(),
+			IsConnected:    true,
+			Subreddits: a.state.Subreddits,
+		}
+
+		// Save to MongoDB
+		ctx := stdctx.Background()
+		if err := a.mongodb.SaveUser(ctx, user); err != nil {
+			log.Printf("Failed to save user to MongoDB: %v", err)
+			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "Failed to save user", err))
+			return
+		}
+
+		log.Printf("Successfully created user %s in MongoDB", a.state.ID)
 
 		context.Respond(&UserState{
 			ID:       a.state.ID,
@@ -265,7 +295,6 @@ func (a *UserActor) Receive(context actor.Context) {
 		if a.state.ID == msg.UserID {
 			log.Printf("UserActor: Updating karma for user %s by %d", msg.UserID, msg.Delta)
 			a.state.Karma += msg.Delta
-			// No need to respond since we're using Send instead of RequestFuture
 		}
 
 	case *GetUserProfileMsg:
@@ -298,8 +327,8 @@ func (a *UserActor) Receive(context actor.Context) {
 			Success: true,
 			Token:   token,
 		})
+
 	case *VoteMsg:
-		// Check if already voted
 		var previousVote bool
 		var exists bool
 
@@ -314,7 +343,6 @@ func (a *UserActor) Receive(context actor.Context) {
 			return
 		}
 
-		// Record the vote
 		if msg.TargetType == "post" {
 			a.state.VotedPosts[msg.TargetID] = msg.IsUpvote
 		} else {
@@ -324,14 +352,14 @@ func (a *UserActor) Receive(context actor.Context) {
 		context.Respond(true)
 
 	case *AddToFeedMsg:
-		// Add post to user's feed if subscribed
-		for _, subID := range a.state.Subscriptions {
+		for _, subID := range a.state.Subreddits {
 			if subID == msg.SubredditID {
 				context.Respond(true)
 				return
 			}
 		}
 		context.Respond(false)
+
 	case *ConnectUserMsg:
 		a.state.IsConnected = true
 		a.state.LastActive = time.Now()

@@ -245,7 +245,7 @@ func (a *PostActor) handleGetUserFeed(context actor.Context, msg *GetUserFeedMsg
 
 	// Collect posts from subscribed subreddits
 	var feedPosts []*models.Post
-	for _, subredditID := range userProfile.Subscriptions {
+	for _, subredditID := range userProfile.Subreddits {
 		if postIDs, exists := a.subredditPosts[subredditID]; exists {
 			for _, postID := range postIDs {
 				if post := a.postsByID[postID]; post != nil {
