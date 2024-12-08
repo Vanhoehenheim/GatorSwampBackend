@@ -1,15 +1,18 @@
 package actors
 
 import (
+	stdctx "context"
 	"gator-swamp/internal/database"
 	"gator-swamp/internal/models"
-	"gator-swamp/internal/utils" // Add this for UpdateKarmaMsg
+	"gator-swamp/internal/utils"
 	"log"
 	"sort"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // Message types for Post operations
@@ -51,7 +54,9 @@ type (
 		VotedAt  time.Time
 	}
 
-	GetCountsMsg struct{}
+	GetCountsMsg           struct{}
+	initializePostActorMsg struct{}
+	loadPostsFromDBMsg     struct{}
 )
 
 // PostActor handles post-related operations
@@ -76,40 +81,95 @@ func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID, mongodb
 	}
 }
 
-// Receive handles incoming messages
 func (a *PostActor) Receive(context actor.Context) {
 	switch msg := context.Message().(type) {
 	case *actor.Started:
 		log.Printf("PostActor started")
+		// Send initialization message when actor starts
+		context.Send(context.Self(), &initializePostActorMsg{})
 
-	case *actor.Stopping:
-		log.Printf("PostActor stopping")
+	case *initializePostActorMsg:
+		// Start the initialization process
+		context.Send(context.Self(), &loadPostsFromDBMsg{})
 
-	case *actor.Stopped:
-		log.Printf("PostActor stopped")
+	case *loadPostsFromDBMsg:
+		a.handleLoadPosts(context)
 
-	case *actor.Restarting:
-		log.Printf("PostActor restarting")
 	case *CreatePostMsg:
 		a.handleCreatePost(context, msg)
+
 	case *GetPostMsg:
 		a.handleGetPost(context, msg)
+
 	case *GetSubredditPostsMsg:
 		a.handleGetSubredditPosts(context, msg)
+
 	case *VotePostMsg:
-		log.Printf("PostActor: Processing vote for post: %s from user: %s", msg.PostID, msg.UserID)
 		a.handleVote(context, msg)
+
 	case *GetUserFeedMsg:
 		a.handleGetUserFeed(context, msg)
-	case *GetCountsMsg:
-		context.Respond(len(a.postsByID))
+
 	default:
 		log.Printf("PostActor: Unknown message type: %T", msg)
 	}
 }
 
+func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
+	// First check local cache
+	if post, exists := a.postsByID[msg.PostID]; exists {
+		context.Respond(post)
+		return
+	}
+
+	// If not in cache, try MongoDB
+	ctx := stdctx.Background()
+	var post models.Post
+	err := a.mongodb.Posts.FindOne(ctx, bson.M{"_id": msg.PostID}).Decode(&post)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			context.Respond(utils.NewAppError(utils.ErrNotFound, "post not found", nil))
+			return
+		}
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "failed to fetch post", err))
+		return
+	}
+
+	// Update local cache
+	a.postsByID[post.ID] = &post
+	// Initialize vote tracking for this post
+	a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
+	// Update subreddit posts mapping
+	a.subredditPosts[post.SubredditID] = append(a.subredditPosts[post.SubredditID], post.ID)
+
+	context.Respond(&post)
+}
+
+func (a *PostActor) handleLoadPosts(context actor.Context) {
+	ctx := stdctx.Background()
+	cursor, err := a.mongodb.Posts.Find(ctx, bson.M{})
+	if err != nil {
+		log.Printf("Error loading posts from MongoDB: %v", err)
+		return
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var post models.Post
+		if err := cursor.Decode(&post); err != nil {
+			log.Printf("Error decoding post: %v", err)
+			continue
+		}
+		a.postsByID[post.ID] = &post
+		a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
+		a.subredditPosts[post.SubredditID] = append(a.subredditPosts[post.SubredditID], post.ID)
+	}
+	log.Printf("Loaded %d posts from MongoDB", len(a.postsByID))
+}
+
 func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) {
 	startTime := time.Now()
+	ctx := stdctx.Background()
 
 	newPost := &models.Post{
 		ID:          uuid.New(),
@@ -122,23 +182,34 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		Downvotes:   0,
 		Karma:       0,
 	}
-	// create a print statement to print the new post
-	log.Printf("PostActor: Creating new post: %s in subreddit : %s", newPost.ID, newPost.SubredditID)
 
+	// Save to MongoDB
+	if _, err := a.mongodb.Posts.InsertOne(ctx, newPost); err != nil {
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save post", err))
+		return
+	}
+
+	// Update subreddit's posts array
+	updateResult := bson.M{
+		"$addToSet": bson.M{"posts": newPost.ID},
+	}
+	_, err := a.mongodb.Subreddits.UpdateOne(ctx, bson.M{"_id": msg.SubredditID}, updateResult)
+	if err != nil {
+		// Rollback post creation if subreddit update fails
+		if _, deleteErr := a.mongodb.Posts.DeleteOne(ctx, bson.M{"_id": newPost.ID}); deleteErr != nil {
+			log.Printf("Failed to delete post after subreddit update failure: %v", deleteErr)
+		}
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update subreddit posts", err))
+		return
+	}
+
+	// Update local cache
 	a.postsByID[newPost.ID] = newPost
 	a.postVotes[newPost.ID] = make(map[uuid.UUID]voteStatus)
 	a.subredditPosts[msg.SubredditID] = append(a.subredditPosts[msg.SubredditID], newPost.ID)
 
 	a.metrics.AddOperationLatency("create_post", time.Since(startTime))
 	context.Respond(newPost)
-}
-
-func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
-	if post, exists := a.postsByID[msg.PostID]; exists {
-		context.Respond(post)
-	} else {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "post not found", nil))
-	}
 }
 
 func (a *PostActor) handleGetSubredditPosts(context actor.Context, msg *GetSubredditPostsMsg) {
