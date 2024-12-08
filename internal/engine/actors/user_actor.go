@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"gator-swamp/internal/database"
 	"gator-swamp/internal/models"
+	"gator-swamp/internal/types"
 	"gator-swamp/internal/utils"
 	"log"
 	"sync"
@@ -62,12 +63,6 @@ type (
 		Password string
 	}
 
-	LoginResponse struct {
-		Success bool
-		Token   string
-		Error   string
-	}
-
 	VoteMsg struct {
 		UserID     uuid.UUID
 		TargetID   uuid.UUID
@@ -106,7 +101,7 @@ type UserState struct {
 	Comments       []uuid.UUID
 	HashedPassword string
 	AuthToken      string
-	Subreddits  []uuid.UUID
+	Subreddits     []uuid.UUID
 	VotedPosts     map[uuid.UUID]bool
 	VotedComments  map[uuid.UUID]bool
 }
@@ -146,21 +141,57 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		context.Respond(result)
 
 	case *LoginMsg:
+		log.Printf("UserSupervisor: Processing login request for email: %s", msg.Email)
+
+		// Get user from MongoDB
+		ctx := stdctx.Background()
+		user, err := s.mongodb.GetUserByEmail(ctx, msg.Email)
+		if err != nil {
+			log.Printf("UserSupervisor: User not found in MongoDB: %v", err)
+			context.Respond(&types.LoginResponse{
+				Success: false,
+				Error:   "Invalid credentials",
+			})
+			return
+		}
+
+		// Check if we already have an actor for this user
 		s.mu.RLock()
-		userID, exists := s.emailToID[msg.Email]
+		pid, exists := s.userActors[user.ID]
 		s.mu.RUnlock()
 
 		if !exists {
-			context.Respond(&LoginResponse{Success: false, Error: "Invalid credentials"})
+			// Create new actor for this user
+			props := actor.PropsFromProducer(func() actor.Actor {
+				return NewUserActor(user.ID, &RegisterUserMsg{
+					Username: user.Username,
+					Email:    user.Email,
+					Password: "", // Password will be set from MongoDB data
+					Karma:    user.Karma,
+				}, s.mongodb)
+			})
+
+			pid = context.Spawn(props)
+
+			s.mu.Lock()
+			s.userActors[user.ID] = pid
+			s.emailToID[user.Email] = user.ID
+			s.mu.Unlock()
+		}
+
+		// Forward login request to the user actor
+		future := context.RequestFuture(pid, msg, 5*time.Second)
+		result, err := future.Result()
+		if err != nil {
+			log.Printf("UserSupervisor: Login request to user actor failed: %v", err)
+			context.Respond(&types.LoginResponse{
+				Success: false,
+				Error:   "Login failed",
+			})
 			return
 		}
 
-		future := context.RequestFuture(s.userActors[userID], msg, 5*time.Second)
-		result, err := future.Result()
-		if err != nil {
-			context.Respond(&LoginResponse{Success: false, Error: "Login failed"})
-			return
-		}
+		// Forward the response
 		context.Respond(result)
 
 	case *GetUserProfileMsg:
@@ -216,7 +247,7 @@ func NewUserActor(id uuid.UUID, msg *RegisterUserMsg, mongodb *database.MongoDB)
 			Comments:      make([]uuid.UUID, 0),
 			VotedPosts:    make(map[uuid.UUID]bool),
 			VotedComments: make(map[uuid.UUID]bool),
-			Subreddits: make([]uuid.UUID, 0),
+			Subreddits:    make([]uuid.UUID, 0),
 		},
 		mongodb: mongodb,
 	}
@@ -262,7 +293,7 @@ func (a *UserActor) Receive(context actor.Context) {
 			CreatedAt:      time.Now(),
 			LastActive:     time.Now(),
 			IsConnected:    true,
-			Subreddits: a.state.Subreddits,
+			Subreddits:     a.state.Subreddits,
 		}
 
 		// Save to MongoDB
@@ -305,25 +336,65 @@ func (a *UserActor) Receive(context actor.Context) {
 		}
 
 	case *LoginMsg:
-		if a.state.Email != msg.Email {
-			context.Respond(&LoginResponse{Success: false, Error: "Invalid credentials"})
-			return
-		}
+		log.Printf("Processing login request for email: %s", msg.Email)
 
-		err := bcrypt.CompareHashAndPassword([]byte(a.state.HashedPassword), []byte(msg.Password))
+		ctx := stdctx.Background()
+		user, err := a.mongodb.GetUserByEmail(ctx, msg.Email)
 		if err != nil {
-			context.Respond(&LoginResponse{Success: false, Error: "Invalid credentials"})
+			log.Printf("Login failed - Error fetching user from MongoDB: %v", err)
+			context.Respond(&types.LoginResponse{
+				Success: false,
+				Error:   "Invalid credentials",
+			})
 			return
 		}
 
+		// Verify password
+		err = bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(msg.Password))
+		if err != nil {
+			log.Printf("Login failed - Password comparison error: %v", err)
+			context.Respond(&types.LoginResponse{
+				Success: false,
+				Error:   "Invalid credentials",
+			})
+			return
+		}
+
+		// Generate authentication token
 		token, err := generateToken()
 		if err != nil {
-			context.Respond(&LoginResponse{Success: false, Error: "Authentication error"})
+			log.Printf("Failed to generate auth token: %v", err)
+			context.Respond(&types.LoginResponse{
+				Success: false,
+				Error:   "Authentication error",
+			})
 			return
 		}
 
-		a.state.AuthToken = token
-		context.Respond(&LoginResponse{
+		// Update user's last active time and connected status
+		err = a.mongodb.UpdateUserActivity(ctx, user.ID, true)
+		if err != nil {
+			log.Printf("Warning: Failed to update user activity in MongoDB: %v", err)
+		}
+
+		// Update actor's state
+		a.state = &UserState{
+			ID:             user.ID,
+			Username:       user.Username,
+			Email:          user.Email,
+			Karma:          user.Karma,
+			IsConnected:    true,
+			LastActive:     time.Now(),
+			AuthToken:      token,
+			HashedPassword: user.HashedPassword,
+			VotedPosts:     make(map[uuid.UUID]bool),
+			VotedComments:  make(map[uuid.UUID]bool),
+			Subreddits:     user.Subreddits,
+		}
+
+		log.Printf("Login successful for user: %s", user.Username)
+
+		context.Respond(&types.LoginResponse{
 			Success: true,
 			Token:   token,
 		})

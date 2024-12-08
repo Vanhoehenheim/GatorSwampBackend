@@ -554,19 +554,33 @@ func (s *Server) handleUserLogin() http.HandlerFunc {
 			return
 		}
 
-		future := s.context.RequestFuture(s.engine.GetUserSupervisor(), &actors.LoginMsg{
-			Email:    req.Email,
-			Password: req.Password,
-		}, 5*time.Second)
+		log.Printf("HTTP Handler: Received login request for email: %s", req.Email)
+
+		future := s.context.RequestFuture(
+			s.engine.GetUserSupervisor(),
+			&actors.LoginMsg{
+				Email:    req.Email,
+				Password: req.Password,
+			},
+			5*time.Second,
+		)
 
 		result, err := future.Result()
 		if err != nil {
+			log.Printf("HTTP Handler: Error getting login result: %v", err)
 			http.Error(w, "Failed to process login", http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("HTTP Handler: Received raw result: %+v", result)
+
+		// Important: directly encode the result without type assertion
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			log.Printf("HTTP Handler: Failed to encode response: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 }
 
