@@ -195,12 +195,12 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		context.Respond(result)
 
 	case *GetUserProfileMsg:
-		s.mu.RLock()
-		pid, exists := s.userActors[msg.UserID]
-		s.mu.RUnlock()
+		log.Printf("UserSupervisor: Getting profile for user ID: %s", msg.UserID)
 
-		if !exists {
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", nil))
+		pid, err := s.getOrCreateUserActor(context, msg.UserID)
+		if err != nil {
+			log.Printf("UserSupervisor: Failed to get/create user actor: %v", err)
+			context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", err))
 			return
 		}
 
@@ -225,6 +225,42 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		log.Printf("UserSupervisor: Forwarding karma update to user actor %s", msg.UserID)
 		context.Send(pid, msg)
 	}
+}
+
+func (s *UserSupervisor) getOrCreateUserActor(context actor.Context, userID uuid.UUID) (*actor.PID, error) {
+	s.mu.RLock()
+	pid, exists := s.userActors[userID]
+	s.mu.RUnlock()
+
+	if exists {
+		return pid, nil
+	}
+
+	// Get user from MongoDB
+	ctx := stdctx.Background()
+	user, err := s.mongodb.GetUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create new actor for this user
+	props := actor.PropsFromProducer(func() actor.Actor {
+		return NewUserActor(user.ID, &RegisterUserMsg{
+			Username: user.Username,
+			Email:    user.Email,
+			Password: user.HashedPassword,
+			Karma:    user.Karma,
+		}, s.mongodb)
+	})
+
+	pid = context.Spawn(props)
+
+	s.mu.Lock()
+	s.userActors[user.ID] = pid
+	s.emailToID[user.Email] = user.ID
+	s.mu.Unlock()
+
+	return pid, nil
 }
 
 type UserActor struct {
@@ -329,11 +365,35 @@ func (a *UserActor) Receive(context actor.Context) {
 		}
 
 	case *GetUserProfileMsg:
-		if a.state.ID == msg.UserID {
-			context.Respond(a.state)
-		} else {
-			context.Respond(nil)
+		ctx := stdctx.Background()
+		user, err := a.mongodb.GetUser(ctx, msg.UserID)
+		if err != nil {
+			if utils.IsErrorCode(err, utils.ErrUserNotFound) {
+				context.Respond(nil)
+				return
+			}
+			log.Printf("Error fetching user from MongoDB: %v", err)
+			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch user", err))
+			return
 		}
+
+		// Convert MongoDB user to UserState
+		state := &UserState{
+			ID:             user.ID,
+			Username:       user.Username,
+			Email:          user.Email,
+			Karma:          user.Karma,
+			IsConnected:    user.IsConnected,
+			LastActive:     user.LastActive,
+			HashedPassword: user.HashedPassword,
+			Subreddits:     user.Subreddits,
+			VotedPosts:     make(map[uuid.UUID]bool),
+			VotedComments:  make(map[uuid.UUID]bool),
+		}
+
+		// Update in-memory state
+		a.state = state
+		context.Respond(state)
 
 	case *LoginMsg:
 		log.Printf("Processing login request for email: %s", msg.Email)

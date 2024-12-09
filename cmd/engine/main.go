@@ -408,8 +408,8 @@ func (s *Server) handleSubredditMembers() http.HandlerFunc {
 func (s *Server) handlePost() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
+		// create new post
 		case http.MethodPost:
-			// Existing post creation logic
 			var req CreatePostRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -421,11 +421,13 @@ func (s *Server) handlePost() http.HandlerFunc {
 				http.Error(w, "Invalid author ID format", http.StatusBadRequest)
 				return
 			}
+
 			subredditID, err := uuid.Parse(req.SubredditID)
 			if err != nil {
 				http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
 				return
 			}
+
 			future := s.context.RequestFuture(s.enginePID, &actors.CreatePostMsg{
 				Title:       req.Title,
 				Content:     req.Content,
@@ -435,20 +437,38 @@ func (s *Server) handlePost() http.HandlerFunc {
 
 			result, err := future.Result()
 			if err != nil {
-				http.Error(w, "Failed to create post", http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("Failed to create post: %v", err), http.StatusInternalServerError)
+				return
+			}
+
+			// Check for application errors
+			if appErr, ok := result.(*utils.AppError); ok {
+				var statusCode int
+				switch appErr.Code {
+				case utils.ErrNotFound:
+					statusCode = http.StatusNotFound
+				case utils.ErrDatabase:
+					statusCode = http.StatusInternalServerError
+				case utils.ErrInvalidInput:
+					statusCode = http.StatusBadRequest
+				case utils.ErrUnauthorized:
+					statusCode = http.StatusUnauthorized
+				default:
+					statusCode = http.StatusInternalServerError
+				}
+				http.Error(w, appErr.Error(), statusCode)
 				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(result)
 
+			// get post by post ID or subreddit ID
 		case http.MethodGet:
-			// Handle getting a specific post or list of posts
 			postID := r.URL.Query().Get("id")
 			subredditID := r.URL.Query().Get("subredditId")
 
 			if postID != "" {
-				// Get specific post
 				id, err := uuid.Parse(postID)
 				if err != nil {
 					http.Error(w, "Invalid post ID format", http.StatusBadRequest)
@@ -461,7 +481,22 @@ func (s *Server) handlePost() http.HandlerFunc {
 
 				result, err := future.Result()
 				if err != nil {
-					http.Error(w, "Failed to get post", http.StatusInternalServerError)
+					http.Error(w, fmt.Sprintf("Failed to get post: %v", err), http.StatusInternalServerError)
+					return
+				}
+
+				// Check for application errors
+				if appErr, ok := result.(*utils.AppError); ok {
+					var statusCode int
+					switch appErr.Code {
+					case utils.ErrNotFound:
+						statusCode = http.StatusNotFound
+					case utils.ErrDatabase:
+						statusCode = http.StatusInternalServerError
+					default:
+						statusCode = http.StatusInternalServerError
+					}
+					http.Error(w, appErr.Error(), statusCode)
 					return
 				}
 
@@ -471,7 +506,6 @@ func (s *Server) handlePost() http.HandlerFunc {
 			}
 
 			if subredditID != "" {
-				// Get posts for a specific subreddit
 				id, err := uuid.Parse(subredditID)
 				if err != nil {
 					http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
@@ -484,7 +518,22 @@ func (s *Server) handlePost() http.HandlerFunc {
 
 				result, err := future.Result()
 				if err != nil {
-					http.Error(w, "Failed to get subreddit posts", http.StatusInternalServerError)
+					http.Error(w, fmt.Sprintf("Failed to get subreddit posts: %v", err), http.StatusInternalServerError)
+					return
+				}
+
+				// Check for application errors
+				if appErr, ok := result.(*utils.AppError); ok {
+					var statusCode int
+					switch appErr.Code {
+					case utils.ErrNotFound:
+						statusCode = http.StatusNotFound
+					case utils.ErrDatabase:
+						statusCode = http.StatusInternalServerError
+					default:
+						statusCode = http.StatusInternalServerError
+					}
+					http.Error(w, appErr.Error(), statusCode)
 					return
 				}
 

@@ -183,17 +183,16 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		Karma:       0,
 	}
 
-	// Save to MongoDB
+	log.Printf("PostActor: Creating new post: %s in subreddit: %s", newPost.ID, newPost.SubredditID)
+
+	// First save the post to MongoDB
 	if _, err := a.mongodb.Posts.InsertOne(ctx, newPost); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save post", err))
 		return
 	}
 
-	// Update subreddit's posts array
-	updateResult := bson.M{
-		"$addToSet": bson.M{"posts": newPost.ID},
-	}
-	_, err := a.mongodb.Subreddits.UpdateOne(ctx, bson.M{"_id": msg.SubredditID}, updateResult)
+	// Update subreddit's posts array using the helper function
+	err := a.mongodb.UpdateSubredditPosts(ctx, msg.SubredditID, newPost.ID, true)
 	if err != nil {
 		// Rollback post creation if subreddit update fails
 		if _, deleteErr := a.mongodb.Posts.DeleteOne(ctx, bson.M{"_id": newPost.ID}); deleteErr != nil {

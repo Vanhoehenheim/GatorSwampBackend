@@ -168,25 +168,38 @@ func (a *SubredditActor) handleGetSubreddit(ctx actor.Context, msg *GetSubreddit
 func (a *SubredditActor) handleJoinSubreddit(ctx actor.Context, msg *JoinSubredditMsg) {
 	startTime := time.Now()
 
-	subreddit, exists := a.subredditsById[msg.SubredditID]
-	if !exists {
+	// Create single context for all DB operations
+	dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
+
+	// First verify subreddit exists and get latest data from MongoDB
+	subredditFromDB, err := a.mongodb.GetSubredditByID(dbCtx, msg.SubredditID)
+	if err != nil {
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to get subreddit", err))
+		return
+	}
+	if subredditFromDB == nil {
 		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
 		return
 	}
 
-	// Check if user is already a member
-	if members, exists := a.subredditMembers[msg.SubredditID]; exists {
-		if members[msg.UserID] {
-			ctx.Respond(utils.NewAppError(utils.ErrDuplicate, "user is already a member", nil))
-			return
-		}
+	// Update local cache with latest data
+	a.subredditsById[msg.SubredditID] = subredditFromDB
+	a.subredditsByName[subredditFromDB.Name] = subredditFromDB
+
+	// Initialize member map if doesn't exist
+	if _, exists := a.subredditMembers[msg.SubredditID]; !exists {
+		a.subredditMembers[msg.SubredditID] = make(map[uuid.UUID]bool)
 	}
 
-	dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
-	defer cancel()
+	// Check if user is already a member
+	if a.subredditMembers[msg.SubredditID][msg.UserID] {
+		ctx.Respond(utils.NewAppError(utils.ErrDuplicate, "user is already a member", nil))
+		return
+	}
 
 	// Update MongoDB subreddit members count
-	err := a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, 1)
+	err = a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, 1)
 	if err != nil {
 		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "failed to update member count", err))
 		return
@@ -195,7 +208,6 @@ func (a *SubredditActor) handleJoinSubreddit(ctx actor.Context, msg *JoinSubredd
 	// Update user's subreddits list
 	err = a.mongodb.UpdateUserSubreddits(dbCtx, msg.UserID, msg.SubredditID, true)
 	if err != nil {
-		log.Printf("Warning: Failed to update user's subreddit list: %v", err)
 		// Rollback the member count update
 		rollbackErr := a.mongodb.UpdateSubredditMembers(dbCtx, msg.SubredditID, -1)
 		if rollbackErr != nil {
@@ -206,11 +218,8 @@ func (a *SubredditActor) handleJoinSubreddit(ctx actor.Context, msg *JoinSubredd
 	}
 
 	// Update local cache
-	if _, exists := a.subredditMembers[msg.SubredditID]; !exists {
-		a.subredditMembers[msg.SubredditID] = make(map[uuid.UUID]bool)
-	}
 	a.subredditMembers[msg.SubredditID][msg.UserID] = true
-	subreddit.Members++
+	subredditFromDB.Members++
 
 	log.Printf("SubredditActor: User %s joined subreddit %s", msg.UserID, msg.SubredditID)
 	a.metrics.AddOperationLatency("join_subreddit", time.Since(startTime))
@@ -289,15 +298,22 @@ func (a *SubredditActor) handleListSubreddits(ctx actor.Context) {
 }
 
 func (a *SubredditActor) handleGetMembers(ctx actor.Context, msg *GetSubredditMembersMsg) {
-	if members, exists := a.subredditMembers[msg.SubredditID]; exists {
-		memberIDs := make([]uuid.UUID, 0, len(members))
-		for userID := range members {
-			memberIDs = append(memberIDs, userID)
-		}
-		ctx.Respond(memberIDs)
-	} else {
-		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+	log.Printf("Getting members for subreddit: %s", msg.SubredditID)
+	std_ctx := stdctx.Background()
+	memberIDs, err := a.mongodb.GetSubredditMembers(std_ctx, msg.SubredditID)
+	if err != nil {
+		ctx.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to get subreddit members", err))
+		return
 	}
+
+	if len(memberIDs) == 0 {
+		// Decide if you want to return an empty list or an error
+		ctx.Respond([]string{}) // or ctx.Respond(utils.NewAppError(...))
+		return
+	}
+
+	log.Printf("Found %d members for subreddit: %s", len(memberIDs), msg.SubredditID)
+	ctx.Respond(memberIDs)
 }
 
 func (a *SubredditActor) handleGetDetails(ctx actor.Context, msg *GetSubredditDetailsMsg) {

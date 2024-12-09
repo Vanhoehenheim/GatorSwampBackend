@@ -15,11 +15,11 @@ import (
 
 // PostDocument represents post data in MongoDB
 type PostDocument struct {
-	ID          uuid.UUID `bson:"_id"`
+	ID          string    `bson:"_id"`
 	Title       string    `bson:"title"`
 	Content     string    `bson:"content"`
-	AuthorID    uuid.UUID `bson:"authorId"`
-	SubredditID uuid.UUID `bson:"subredditId"`
+	AuthorID    string    `bson:"authorId"`
+	SubredditID string    `bson:"subredditId"`
 	CreatedAt   time.Time `bson:"createdAt"`
 	Upvotes     int       `bson:"upvotes"`
 	Downvotes   int       `bson:"downvotes"`
@@ -29,11 +29,11 @@ type PostDocument struct {
 // SavePost creates or updates a post in MongoDB
 func (m *MongoDB) SavePost(ctx context.Context, post *models.Post) error {
 	doc := PostDocument{
-		ID:          post.ID,
+		ID:          post.ID.String(),
 		Title:       post.Title,
 		Content:     post.Content,
-		AuthorID:    post.AuthorID,
-		SubredditID: post.SubredditID,
+		AuthorID:    post.AuthorID.String(),
+		SubredditID: post.SubredditID.String(),
 		CreatedAt:   post.CreatedAt,
 		Upvotes:     post.Upvotes,
 		Downvotes:   post.Downvotes,
@@ -58,13 +58,16 @@ func (m *MongoDB) GetPost(ctx context.Context, id uuid.UUID) (*models.Post, erro
 	if err != nil {
 		return nil, err
 	}
-
+	// convert doc.id to uuid
+	id_uuid, _ := uuid.Parse(doc.ID)
+	authorid_uuid, _ := uuid.Parse(doc.AuthorID)
+	subredditid_uuid, _ := uuid.Parse(doc.SubredditID)
 	return &models.Post{
-		ID:          doc.ID,
+		ID:          id_uuid,
 		Title:       doc.Title,
 		Content:     doc.Content,
-		AuthorID:    doc.AuthorID,
-		SubredditID: doc.SubredditID,
+		AuthorID:    authorid_uuid,
+		SubredditID: subredditid_uuid,
 		CreatedAt:   doc.CreatedAt,
 		Upvotes:     doc.Upvotes,
 		Downvotes:   doc.Downvotes,
@@ -86,12 +89,15 @@ func (m *MongoDB) GetSubredditPosts(ctx context.Context, subredditID uuid.UUID) 
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
+		id_uuid, _ := uuid.Parse(doc.ID)
+		authorid_uuid, _ := uuid.Parse(doc.AuthorID)
+		subredditid_uuid, _ := uuid.Parse(doc.SubredditID)
 		posts = append(posts, &models.Post{
-			ID:          doc.ID,
+			ID:          id_uuid,
 			Title:       doc.Title,
 			Content:     doc.Content,
-			AuthorID:    doc.AuthorID,
-			SubredditID: doc.SubredditID,
+			AuthorID:    authorid_uuid,
+			SubredditID: subredditid_uuid,
 			CreatedAt:   doc.CreatedAt,
 			Upvotes:     doc.Upvotes,
 			Downvotes:   doc.Downvotes,
@@ -122,12 +128,15 @@ func (m *MongoDB) GetUserFeed(ctx context.Context, subredditIDs []uuid.UUID, lim
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
+		id_uuid, _ := uuid.Parse(doc.ID)
+		authorid_uuid, _ := uuid.Parse(doc.AuthorID)
+		subredditid_uuid, _ := uuid.Parse(doc.SubredditID)
 		posts = append(posts, &models.Post{
-			ID:          doc.ID,
+			ID:          id_uuid,
 			Title:       doc.Title,
 			Content:     doc.Content,
-			AuthorID:    doc.AuthorID,
-			SubredditID: doc.SubredditID,
+			AuthorID:    authorid_uuid,
+			SubredditID: subredditid_uuid,
 			CreatedAt:   doc.CreatedAt,
 			Upvotes:     doc.Upvotes,
 			Downvotes:   doc.Downvotes,

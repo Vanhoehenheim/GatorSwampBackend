@@ -146,26 +146,27 @@ func (e *Engine) Receive(context actor.Context) {
 		context.Respond(result)
 
 	case *actors.CreatePostMsg:
-		memberFuture := context.RequestFuture(e.subredditActor,
-			&actors.GetSubredditMembersMsg{SubredditID: msg.SubredditID},
+		// Get user profile to check subreddit membership
+		userFuture := context.RequestFuture(e.GetUserSupervisor(),
+			&actors.GetUserProfileMsg{UserID: msg.AuthorID},
 			5*time.Second)
 
-		memberResult, err := memberFuture.Result()
+		result, err := userFuture.Result()
 		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to validate membership", err))
+			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to validate user", err))
 			return
 		}
 
-		members, ok := memberResult.([]uuid.UUID)
-		if !ok {
-			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "Invalid member list", nil))
+		userState, ok := result.(*actors.UserState)
+		if !ok || userState == nil {
+			context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", nil))
 			return
 		}
 
-		// Check if user is a member
+		// Check if user is a member of the subreddit
 		isMember := false
-		for _, memberID := range members {
-			if memberID == msg.AuthorID {
+		for _, subID := range userState.Subreddits {
+			if subID == msg.SubredditID {
 				isMember = true
 				break
 			}
@@ -178,7 +179,7 @@ func (e *Engine) Receive(context actor.Context) {
 
 		// Forward to PostActor
 		future := context.RequestFuture(e.postActor, msg, 5*time.Second)
-		result, err := future.Result()
+		result, err = future.Result()
 		if err != nil {
 			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to create post", err))
 			return
