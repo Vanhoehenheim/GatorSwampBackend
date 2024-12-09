@@ -19,6 +19,7 @@ type MongoDB struct {
 	Comments   *mongo.Collection
 	Subreddits *mongo.Collection
 	Messages   *mongo.Collection
+	Votes      *mongo.Collection
 }
 
 func NewMongoDB(uri string) (*MongoDB, error) {

@@ -31,6 +31,15 @@ type CommentDocument struct {
 	Karma       int       `bson:"karma"`
 }
 
+type VoteDocument struct {
+	ID        string    `bson:"_id"`
+	UserID    string    `bson:"userId"`
+	CommentID string    `bson:"commentId"`
+	IsUpvote  bool      `bson:"isUpvote"`
+	CreatedAt time.Time `bson:"createdAt"`
+	UpdatedAt time.Time `bson:"updatedAt"`
+}
+
 // SaveComment creates or updates a comment in MongoDB
 func (m *MongoDB) SaveComment(ctx context.Context, comment *models.Comment) error {
 	doc := CommentDocument{
@@ -164,6 +173,11 @@ func convertCommentDocumentToModel(doc *CommentDocument) (*models.Comment, error
 		return nil, fmt.Errorf("invalid post ID: %v", err)
 	}
 
+	subredditID, err := uuid.Parse(doc.SubredditID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid subreddit ID: %v", err)
+	}
+
 	var parentID *uuid.UUID
 	if doc.ParentID != nil {
 		parsed, err := uuid.Parse(*doc.ParentID)
@@ -173,7 +187,6 @@ func convertCommentDocumentToModel(doc *CommentDocument) (*models.Comment, error
 		parentID = &parsed
 	}
 
-	// Convert Children strings to UUIDs
 	children := make([]uuid.UUID, len(doc.Children))
 	for i, childIDStr := range doc.Children {
 		childID, err := uuid.Parse(childIDStr)
@@ -184,18 +197,19 @@ func convertCommentDocumentToModel(doc *CommentDocument) (*models.Comment, error
 	}
 
 	return &models.Comment{
-		ID:        id,
-		Content:   doc.Content,
-		AuthorID:  authorID,
-		PostID:    postID,
-		ParentID:  parentID,
-		Children:  children,
-		CreatedAt: doc.CreatedAt,
-		UpdatedAt: doc.UpdatedAt,
-		IsDeleted: doc.IsDeleted,
-		Upvotes:   doc.Upvotes,
-		Downvotes: doc.Downvotes,
-		Karma:     doc.Karma,
+		ID:          id,
+		Content:     doc.Content,
+		AuthorID:    authorID,
+		PostID:      postID,
+		SubredditID: subredditID,
+		ParentID:    parentID,
+		Children:    children,
+		CreatedAt:   doc.CreatedAt,
+		UpdatedAt:   doc.UpdatedAt,
+		IsDeleted:   doc.IsDeleted,
+		Upvotes:     doc.Upvotes,
+		Downvotes:   doc.Downvotes,
+		Karma:       doc.Karma,
 	}, nil
 }
 
@@ -222,4 +236,45 @@ func (m *MongoDB) EnsureCommentIndexes(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (m *MongoDB) GetUserVoteOnComment(ctx context.Context, userID, commentID uuid.UUID) (bool, bool, error) {
+	var vote VoteDocument
+	err := m.Votes.FindOne(ctx, bson.M{
+		"userId":    userID.String(),
+		"commentId": commentID.String(),
+	}).Decode(&vote)
+
+	if err == mongo.ErrNoDocuments {
+		return false, false, nil // No vote found
+	}
+	if err != nil {
+		return false, false, err
+	}
+
+	return true, vote.IsUpvote, nil // Vote found, return the vote type
+}
+
+func (m *MongoDB) SaveCommentVote(ctx context.Context, userID, commentID uuid.UUID, isUpvote bool) error {
+	now := time.Now()
+	voteID := uuid.New().String()
+
+	vote := VoteDocument{
+		ID:        voteID,
+		UserID:    userID.String(),
+		CommentID: commentID.String(),
+		IsUpvote:  isUpvote,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	opts := options.Update().SetUpsert(true)
+	filter := bson.M{
+		"userId":    userID.String(),
+		"commentId": commentID.String(),
+	}
+	update := bson.M{"$set": vote}
+
+	_, err := m.Votes.UpdateOne(ctx, filter, update, opts)
+	return err
 }

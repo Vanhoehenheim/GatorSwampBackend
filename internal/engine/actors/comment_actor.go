@@ -163,6 +163,14 @@ func (a *CommentActor) handleLoadComments(context actor.Context) {
 }
 
 func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCommentMsg) {
+	// First, fetch the post to get its subredditID
+	ctx := stdctx.Background()
+	post, err := a.mongodb.GetPost(ctx, msg.PostID)
+	if err != nil {
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch parent post", err))
+		return
+	}
+
 	now := time.Now()
 	commentID := uuid.New()
 
@@ -171,7 +179,7 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		Content:     msg.Content,
 		AuthorID:    msg.AuthorID,
 		PostID:      msg.PostID,
-		SubredditID: msg.SubredditID,
+		SubredditID: post.SubredditID, // Set the subredditID from the parent post
 		ParentID:    msg.ParentID,
 		Children:    make([]uuid.UUID, 0),
 		CreatedAt:   now,
@@ -183,7 +191,6 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 	}
 
 	// Save to MongoDB first
-	ctx := stdctx.Background()
 	if err := a.mongodb.SaveComment(ctx, newComment); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save comment", err))
 		return
@@ -322,8 +329,15 @@ func (a *CommentActor) handleGetPostComments(context actor.Context, msg *GetComm
 }
 
 func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteCommentMsg) {
-	comment, exists := a.comments[msg.CommentID]
-	if !exists || comment.IsDeleted {
+	// Get the comment with full details from MongoDB first
+	ctx := stdctx.Background()
+	retrievedComment, err := a.mongodb.GetComment(ctx, msg.CommentID)
+	if err != nil {
+		context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", err))
+		return
+	}
+
+	if retrievedComment.IsDeleted {
 		context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", nil))
 		return
 	}
@@ -342,41 +356,52 @@ func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteComment
 		}
 
 		if msg.IsUpvote {
-			comment.Downvotes--
-			comment.Upvotes++
+			retrievedComment.Downvotes--
+			retrievedComment.Upvotes++
 			karmaChange = 2
 		} else {
-			comment.Upvotes--
-			comment.Downvotes++
+			retrievedComment.Upvotes--
+			retrievedComment.Downvotes++
 			karmaChange = -2
 		}
 	} else {
 		if msg.IsUpvote {
-			comment.Upvotes++
+			retrievedComment.Upvotes++
 			karmaChange = 1
 		} else {
-			comment.Downvotes++
+			retrievedComment.Downvotes++
 			karmaChange = -1
 		}
 	}
 
 	a.commentVotes[msg.CommentID][msg.UserID] = msg.IsUpvote
-	comment.Karma = comment.Upvotes - comment.Downvotes
+	retrievedComment.Karma = retrievedComment.Upvotes - retrievedComment.Downvotes
 
-	// Update in MongoDB
-	ctx := stdctx.Background()
-	if err := a.mongodb.UpdateCommentVotes(ctx, msg.CommentID, comment.Upvotes, comment.Downvotes); err != nil {
+	// Update comment votes in MongoDB
+	if err := a.mongodb.UpdateCommentVotes(ctx, msg.CommentID, retrievedComment.Upvotes, retrievedComment.Downvotes); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update vote", err))
 		return
 	}
 
-	// Update author's karma
+	// Update user karma in MongoDB
 	if karmaChange != 0 {
+		log.Printf("Updating karma for user %s by %d points", retrievedComment.AuthorID, karmaChange)
+		err := a.mongodb.UpdateUserKarma(ctx, retrievedComment.AuthorID, karmaChange)
+		if err != nil {
+			log.Printf("Failed to update user karma in MongoDB: %v", err)
+			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update user karma", err))
+			return
+		}
+
+		// Notify the Engine/UserActor about the karma change
 		context.Send(a.enginePID, &UpdateKarmaMsg{
-			UserID: comment.AuthorID,
+			UserID: retrievedComment.AuthorID,
 			Delta:  karmaChange,
 		})
 	}
 
-	context.Respond(comment)
+	// Update the local cache with the full comment data
+	a.comments[msg.CommentID] = retrievedComment
+
+	context.Respond(retrievedComment)
 }
