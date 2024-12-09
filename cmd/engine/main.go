@@ -124,6 +124,9 @@ func main() {
 			log.Printf("Error closing MongoDB connection: %v", err)
 		}
 	}()
+	if err := mongodb.FixCommentSubreddits(context.Background()); err != nil {
+		log.Printf("Error fixing comment subreddits: %v", err)
+	}
 	cfg := config.DefaultConfig()
 	metrics := utils.NewMetricsCollector()
 	system := actor.NewActorSystem()
@@ -146,6 +149,7 @@ func main() {
 	server.commentActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
 		return actors.NewCommentActor(enginePID, mongodb)
 	}))
+	log.Printf("Initialized CommentActor with PID: %v", server.commentActor)
 
 	server.directMessageActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
 		return actors.NewDirectMessageActor(mongodb)
@@ -794,20 +798,26 @@ func (s *Server) handleComment() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
+			log.Printf("Received comment creation request")
 			var req CreateCommentRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				log.Printf("Error decoding request: %v", err)
 				http.Error(w, "Invalid request", http.StatusBadRequest)
 				return
 			}
 
+			log.Printf("Creating comment for post: %s by author: %s", req.PostID, req.AuthorID)
+
 			authorID, err := uuid.Parse(req.AuthorID)
 			if err != nil {
+				log.Printf("Error parsing author ID: %v", err)
 				http.Error(w, "Invalid author ID", http.StatusBadRequest)
 				return
 			}
 
 			postID, err := uuid.Parse(req.PostID)
 			if err != nil {
+				log.Printf("Error parsing post ID: %v", err)
 				http.Error(w, "Invalid post ID", http.StatusBadRequest)
 				return
 			}
@@ -816,12 +826,14 @@ func (s *Server) handleComment() http.HandlerFunc {
 			if req.ParentID != "" {
 				parsed, err := uuid.Parse(req.ParentID)
 				if err != nil {
+					log.Printf("Error parsing parent ID: %v", err)
 					http.Error(w, "Invalid parent comment ID", http.StatusBadRequest)
 					return
 				}
 				parentID = &parsed
 			}
 
+			log.Printf("Sending CreateCommentMsg to comment actor")
 			future := s.context.RequestFuture(s.commentActor, &actors.CreateCommentMsg{
 				Content:  req.Content,
 				AuthorID: authorID,
@@ -831,13 +843,19 @@ func (s *Server) handleComment() http.HandlerFunc {
 
 			result, err := future.Result()
 			if err != nil {
+				log.Printf("Error getting result from comment actor: %v", err)
 				http.Error(w, "Failed to create comment", http.StatusInternalServerError)
 				return
 			}
 
+			log.Printf("Received result from comment actor: %+v", result)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(result)
-
+			if err := json.NewEncoder(w).Encode(result); err != nil {
+				log.Printf("Error encoding response: %v", err)
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+				return
+			}
+			log.Printf("Successfully sent response")
 		case http.MethodPut:
 			var req EditCommentRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
