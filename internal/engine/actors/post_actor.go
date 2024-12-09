@@ -6,7 +6,6 @@ import (
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils"
 	"log"
-	"sort"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -185,8 +184,11 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 
 	log.Printf("PostActor: Creating new post: %s in subreddit: %s", newPost.ID, newPost.SubredditID)
 
-	// First save the post to MongoDB
-	if _, err := a.mongodb.Posts.InsertOne(ctx, newPost); err != nil {
+	// Convert to document using MongoDB helper
+	postDoc := a.mongodb.ModelToDocument(newPost)
+
+	// Save the document version to MongoDB
+	if _, err := a.mongodb.Posts.InsertOne(ctx, postDoc); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save post", err))
 		return
 	}
@@ -195,7 +197,7 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 	err := a.mongodb.UpdateSubredditPosts(ctx, msg.SubredditID, newPost.ID, true)
 	if err != nil {
 		// Rollback post creation if subreddit update fails
-		if _, deleteErr := a.mongodb.Posts.DeleteOne(ctx, bson.M{"_id": newPost.ID}); deleteErr != nil {
+		if _, deleteErr := a.mongodb.Posts.DeleteOne(ctx, bson.M{"_id": postDoc.ID}); deleteErr != nil {
 			log.Printf("Failed to delete post after subreddit update failure: %v", deleteErr)
 		}
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update subreddit posts", err))
@@ -294,48 +296,14 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 func (a *PostActor) handleGetUserFeed(context actor.Context, msg *GetUserFeedMsg) {
 	startTime := time.Now()
 
-	// Get user's subscribed subreddits
-	future := context.RequestFuture(
-		context.Parent(),
-		&GetUserProfileMsg{UserID: msg.UserID},
-		5*time.Second,
-	)
+	ctx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
 
-	result, err := future.Result()
+	// Get fresh feed directly from MongoDB
+	feedPosts, err := a.mongodb.GetUserFeedPosts(ctx, msg.UserID, msg.Limit)
 	if err != nil {
-		context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to get user profile", err))
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to get feed posts", err))
 		return
-	}
-
-	userProfile, ok := result.(*UserState)
-	if !ok || userProfile == nil {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", nil))
-		return
-	}
-
-	// Collect posts from subscribed subreddits
-	var feedPosts []*models.Post
-	for _, subredditID := range userProfile.Subreddits {
-		if postIDs, exists := a.subredditPosts[subredditID]; exists {
-			for _, postID := range postIDs {
-				if post := a.postsByID[postID]; post != nil {
-					feedPosts = append(feedPosts, post)
-				}
-			}
-		}
-	}
-
-	// Sort posts by score (karma and time)
-	sort.Slice(feedPosts, func(i, j int) bool {
-		timeI := time.Since(feedPosts[i].CreatedAt).Hours()
-		timeJ := time.Since(feedPosts[j].CreatedAt).Hours()
-		scoreI := float64(feedPosts[i].Karma) / (timeI + 2.0)
-		scoreJ := float64(feedPosts[j].Karma) / (timeJ + 2.0)
-		return scoreI > scoreJ
-	})
-
-	if msg.Limit > 0 && len(feedPosts) > msg.Limit {
-		feedPosts = feedPosts[:msg.Limit]
 	}
 
 	a.metrics.AddOperationLatency("get_feed", time.Since(startTime))

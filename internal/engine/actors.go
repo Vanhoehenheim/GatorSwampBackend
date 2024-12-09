@@ -211,6 +211,32 @@ func (e *Engine) Receive(context actor.Context) {
 		log.Printf("Engine: Forwarding karma update to UserSupervisor")
 		context.Send(e.userSupervisor, msg)
 
+	case *actors.GetUserFeedMsg:
+		// First validate user exists
+		userFuture := context.RequestFuture(e.userSupervisor,
+			&actors.GetUserProfileMsg{UserID: msg.UserID},
+			5*time.Second)
+
+		result, err := userFuture.Result()
+		if err != nil {
+			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to validate user", err))
+			return
+		}
+
+		userState, ok := result.(*actors.UserState)
+		if !ok || userState == nil {
+			context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", nil))
+			return
+		}
+
+		// Forward to PostActor to get feed
+		future := context.RequestFuture(e.postActor, msg, 5*time.Second)
+		result, err = future.Result()
+		if err != nil {
+			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to get user feed", err))
+			return
+		}
+		context.Respond(result)
 	default:
 		// Route message based on type
 		var targetPID *actor.PID
@@ -279,7 +305,6 @@ func isPostMessage(msg interface{}) bool {
 		*actors.GetPostMsg,
 		*actors.GetSubredditPostsMsg,
 		*actors.VotePostMsg,
-		*actors.GetUserFeedMsg,
 		*actors.DeletePostMsg:
 		return true
 	default:

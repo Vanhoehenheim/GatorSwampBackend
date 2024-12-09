@@ -758,7 +758,8 @@ func (s *Server) handleGetFeed() http.HandlerFunc {
 			}
 		}
 
-		future := s.context.RequestFuture(s.engine.GetPostActor(), &engine.GetUserFeedMsg{
+		// Send to Engine instead of PostActor directly
+		future := s.context.RequestFuture(s.enginePID, &actors.GetUserFeedMsg{
 			UserID: userID,
 			Limit:  limit,
 		}, 5*time.Second)
@@ -766,6 +767,21 @@ func (s *Server) handleGetFeed() http.HandlerFunc {
 		result, err := future.Result()
 		if err != nil {
 			http.Error(w, "Failed to get feed", http.StatusInternalServerError)
+			return
+		}
+
+		// Check for application errors
+		if appErr, ok := result.(*utils.AppError); ok {
+			var statusCode int
+			switch appErr.Code {
+			case utils.ErrNotFound:
+				statusCode = http.StatusNotFound
+			case utils.ErrUnauthorized:
+				statusCode = http.StatusUnauthorized
+			default:
+				statusCode = http.StatusInternalServerError
+			}
+			http.Error(w, appErr.Error(), statusCode)
 			return
 		}
 
