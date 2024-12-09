@@ -244,35 +244,63 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 
 	previousVote, hasVoted := a.postVotes[msg.PostID][msg.UserID]
 
+	// Calculate vote changes
+	upvoteDelta := 0
+	downvoteDelta := 0
+
 	if hasVoted {
 		if previousVote.IsUpvote == msg.IsUpvote {
 			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
 			return
 		}
 		if msg.IsUpvote {
+			upvoteDelta = 1
+			downvoteDelta = -1
 			post.Downvotes--
 			post.Upvotes++
 		} else {
+			upvoteDelta = -1
+			downvoteDelta = 1
 			post.Upvotes--
 			post.Downvotes++
 		}
 	} else {
 		if msg.IsUpvote {
+			upvoteDelta = 1
 			post.Upvotes++
 		} else {
+			downvoteDelta = 1
 			post.Downvotes++
 		}
 	}
 
-	a.postVotes[msg.PostID][msg.UserID] = voteStatus{IsUpvote: msg.IsUpvote, VotedAt: time.Now()}
+	// Update vote status in memory
+	a.postVotes[msg.PostID][msg.UserID] = voteStatus{
+		IsUpvote: msg.IsUpvote,
+		VotedAt:  time.Now(),
+	}
 	post.Karma = post.Upvotes - post.Downvotes
 
-	context.Send(a.enginePID, &UpdateKarmaMsg{UserID: post.AuthorID, Delta: func() int {
-		if msg.IsUpvote {
-			return 1
-		}
-		return -1
-	}()})
+	// Update MongoDB
+	// In handleVote function, replace the MongoDB update section with:
+	ctx := stdctx.Background()
+	err := a.mongodb.UpdatePostVotes(ctx, post.ID, upvoteDelta, downvoteDelta)
+	if err != nil {
+		log.Printf("Failed to update post votes in MongoDB: %v", err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to persist vote", err))
+		return
+	}
+
+	// Update user karma
+	context.Send(a.enginePID, &UpdateKarmaMsg{
+		UserID: post.AuthorID,
+		Delta: func() int {
+			if msg.IsUpvote {
+				return 1
+			}
+			return -1
+		}(),
+	})
 
 	a.metrics.AddOperationLatency("vote_post", time.Since(startTime))
 	context.Respond(post)

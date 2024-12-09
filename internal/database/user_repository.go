@@ -140,16 +140,22 @@ func (m *MongoDB) GetUserByEmail(ctx context.Context, email string) (*models.Use
 
 // UpdateUserKarma increments a user's karma score
 func (m *MongoDB) UpdateUserKarma(ctx context.Context, userID uuid.UUID, delta int) error {
-	filter := bson.M{"_id": userID.String()}
-	update := bson.M{"$inc": bson.M{"karma": delta}}
+	filter := bson.M{"_id": userID.String()} // Note: Using String() since we store IDs as strings
+	update := bson.M{
+		"$inc": bson.M{
+			"karma": delta,
+		},
+	}
 
 	result, err := m.Users.UpdateOne(ctx, filter, update)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to update user karma: %v", err)
 	}
+
 	if result.MatchedCount == 0 {
-		return utils.NewAppError(utils.ErrUserNotFound, "User not found", nil)
+		return fmt.Errorf("user not found: %s", userID)
 	}
+
 	return nil
 }
 

@@ -234,6 +234,15 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 			return
 		}
 
+		// Update MongoDB first
+		ctx := stdctx.Background()
+		err := s.mongodb.UpdateUserKarma(ctx, msg.UserID, msg.Delta)
+		if err != nil {
+			log.Printf("UserSupervisor: Failed to update karma in MongoDB for user %s: %v", msg.UserID, err)
+			return
+		}
+
+		// Then update the actor's state
 		log.Printf("UserSupervisor: Forwarding karma update to user actor %s", msg.UserID)
 		context.Send(pid, msg)
 	}
