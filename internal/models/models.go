@@ -42,14 +42,19 @@ type Post struct {
 
 // Comment represents a comment on a post or another comment
 type Comment struct {
-	ID        uuid.UUID
-	Content   string
-	AuthorID  uuid.UUID
-	PostID    uuid.UUID
-	ParentID  *uuid.UUID // Null for top-level comments
-	CreatedAt time.Time
-	Upvotes   int
-	Downvotes int
+	ID          uuid.UUID   `json:"id"`
+	Content     string      `json:"content"`
+	AuthorID    uuid.UUID   `json:"authorId"`
+	PostID      uuid.UUID   `json:"postId"`
+	SubredditID uuid.UUID   `json:"subredditId"`
+	ParentID    *uuid.UUID  `json:"parentId,omitempty"`
+	Children    []uuid.UUID `json:"children"`
+	CreatedAt   time.Time   `json:"createdAt"`
+	UpdatedAt   time.Time   `json:"updatedAt"`
+	IsDeleted   bool        `json:"isDeleted"`
+	Upvotes     int         `json:"upvotes"`
+	Downvotes   int         `json:"downvotes"`
+	Karma       int         `json:"karma"`
 }
 
 // DirectMessage represents private messages between users
