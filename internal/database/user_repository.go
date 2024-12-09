@@ -14,21 +14,22 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// UserDocument represents core user data in MongoDB
+// UserDocument represents the MongoDB schema for a user
 type UserDocument struct {
-	ID             string    `bson:"_id"`
-	Username       string    `bson:"username"`
-	Email          string    `bson:"email"`
-	HashedPassword string    `bson:"hashedPassword"`
-	Karma          int       `bson:"karma"`
-	CreatedAt      time.Time `bson:"createdAt"`
-	LastActive     time.Time `bson:"lastActive"`
-	IsConnected    bool      `bson:"isConnected"`
-	Subreddits     []string  `bson:"subreddits"`
+	ID             string    `bson:"_id"`            // MongoDB primary key
+	Username       string    `bson:"username"`       // Username
+	Email          string    `bson:"email"`          // Email address
+	HashedPassword string    `bson:"hashedPassword"` // Hashed password
+	Karma          int       `bson:"karma"`          // User's karma points
+	CreatedAt      time.Time `bson:"createdAt"`      // Account creation timestamp
+	LastActive     time.Time `bson:"lastActive"`     // Last active timestamp
+	IsConnected    bool      `bson:"isConnected"`    // Connection status
+	Subreddits     []string  `bson:"subreddits"`     // List of subscribed subreddit IDs
 }
 
-// SaveUser saves or updates a user in MongoDB
+// SaveUser creates or updates a user in MongoDB
 func (m *MongoDB) SaveUser(ctx context.Context, user *models.User) error {
+	// Convert User model to MongoDB document
 	doc := UserDocument{
 		ID:             user.ID.String(),
 		Username:       user.Username,
@@ -54,9 +55,11 @@ func (m *MongoDB) SaveUser(ctx context.Context, user *models.User) error {
 	return err
 }
 
-// GetUser retrieves a user from MongoDB by ID
+// GetUser retrieves a user from MongoDB by their ID
 func (m *MongoDB) GetUser(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	var doc UserDocument
+
+	// Query the user document by ID
 	err := m.Users.FindOne(ctx, bson.M{"_id": id.String()}).Decode(&doc)
 	if err == mongo.ErrNoDocuments {
 		return nil, utils.NewAppError(utils.ErrUserNotFound, "User not found", err)
@@ -65,12 +68,13 @@ func (m *MongoDB) GetUser(ctx context.Context, id uuid.UUID) (*models.User, erro
 		return nil, err
 	}
 
+	// Convert string ID to UUID
 	userID, err := uuid.Parse(doc.ID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID in database: %v", err)
 	}
 
-	// Convert string subreddit IDs back to UUIDs
+	// Convert subreddit string IDs to UUIDs
 	subreddits := make([]uuid.UUID, len(doc.Subreddits))
 	for i, idStr := range doc.Subreddits {
 		subredditID, err := uuid.Parse(idStr)
@@ -93,9 +97,11 @@ func (m *MongoDB) GetUser(ctx context.Context, id uuid.UUID) (*models.User, erro
 	}, nil
 }
 
-// GetUserByEmail retrieves a user from MongoDB by email
+// GetUserByEmail retrieves a user from MongoDB by their email address
 func (m *MongoDB) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	var doc UserDocument
+
+	// Query the user document by email
 	err := m.Users.FindOne(ctx, bson.M{"email": email}).Decode(&doc)
 	if err == mongo.ErrNoDocuments {
 		return nil, utils.NewAppError(utils.ErrUserNotFound, "User not found", err)
@@ -104,12 +110,12 @@ func (m *MongoDB) GetUserByEmail(ctx context.Context, email string) (*models.Use
 		return nil, err
 	}
 
+	// Convert the document to a User model
 	userID, err := uuid.Parse(doc.ID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID in database: %v", err)
 	}
 
-	// Convert string subreddit IDs back to UUIDs
 	subreddits := make([]uuid.UUID, len(doc.Subreddits))
 	for i, idStr := range doc.Subreddits {
 		subredditID, err := uuid.Parse(idStr)
@@ -132,9 +138,9 @@ func (m *MongoDB) GetUserByEmail(ctx context.Context, email string) (*models.Use
 	}, nil
 }
 
-// UpdateUserKarma updates a user's karma in MongoDB
+// UpdateUserKarma increments a user's karma score
 func (m *MongoDB) UpdateUserKarma(ctx context.Context, userID uuid.UUID, delta int) error {
-	filter := bson.M{"_id": userID}
+	filter := bson.M{"_id": userID.String()}
 	update := bson.M{"$inc": bson.M{"karma": delta}}
 
 	result, err := m.Users.UpdateOne(ctx, filter, update)
@@ -147,10 +153,9 @@ func (m *MongoDB) UpdateUserKarma(ctx context.Context, userID uuid.UUID, delta i
 	return nil
 }
 
-// UpdateUserActivity updates a user's last active time and connected status
+// UpdateUserActivity updates a user's last active time and connection status
 func (m *MongoDB) UpdateUserActivity(ctx context.Context, userID uuid.UUID, isConnected bool) error {
-	userIDStr := userID.String()
-	filter := bson.M{"_id": userIDStr}
+	filter := bson.M{"_id": userID.String()}
 	update := bson.M{"$set": bson.M{
 		"lastActive":  time.Now(),
 		"isConnected": isConnected,
@@ -166,18 +171,16 @@ func (m *MongoDB) UpdateUserActivity(ctx context.Context, userID uuid.UUID, isCo
 	return nil
 }
 
-type SubredditTitles struct {
-	ID   uuid.UUID `bson:"_id" json:"id"`
-	Name string    `bson:"name" json:"name"`
-}
-
+// GetUserSubreddits retrieves the subreddits a user is subscribed to
 func (m *MongoDB) GetUserSubreddits(ctx context.Context, userID uuid.UUID) ([]SubredditTitles, error) {
 	var user models.User
-	err := m.Users.FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
+
+	// Query user to get subscribed subreddit IDs
+	err := m.Users.FindOne(ctx, bson.M{"_id": userID.String()}).Decode(&user)
+	if err == mongo.ErrNoDocuments {
+		return nil, utils.NewAppError(utils.ErrUserNotFound, "User not found", err)
+	}
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, utils.NewAppError(utils.ErrUserNotFound, "User not found", err)
-		}
 		return nil, err
 	}
 
@@ -185,6 +188,7 @@ func (m *MongoDB) GetUserSubreddits(ctx context.Context, userID uuid.UUID) ([]Su
 		return []SubredditTitles{}, nil
 	}
 
+	// Fetch subreddit titles for subscribed subreddit IDs
 	cursor, err := m.Subreddits.Find(ctx,
 		bson.M{"_id": bson.M{"$in": user.Subreddits}},
 		options.Find().SetProjection(bson.M{"_id": 1, "name": 1}),
@@ -202,26 +206,29 @@ func (m *MongoDB) GetUserSubreddits(ctx context.Context, userID uuid.UUID) ([]Su
 	return subreddits, nil
 }
 
+// UpdateUserSubreddits adds or removes a subreddit from a user's subscriptions
 func (m *MongoDB) UpdateUserSubreddits(ctx context.Context, userID uuid.UUID, subredditID uuid.UUID, isJoining bool) error {
-	fmt.Print(userID)
-	userIDStr := userID.String()
-	subredditIDStr := subredditID.String()
-	filter := bson.M{"_id": userIDStr}
+	filter := bson.M{"_id": userID.String()}
 	var update bson.M
 
 	if isJoining {
-		update = bson.M{"$addToSet": bson.M{"subreddits": subredditIDStr}}
+		update = bson.M{"$addToSet": bson.M{"subreddits": subredditID.String()}}
 	} else {
-		update = bson.M{"$pull": bson.M{"subreddits": subredditIDStr}}
+		update = bson.M{"$pull": bson.M{"subreddits": subredditID.String()}}
 	}
 
 	result, err := m.Users.UpdateOne(ctx, filter, update)
 	if err != nil {
-		fmt.Print(err)
 		return err
 	}
 	if result.MatchedCount == 0 {
 		return utils.NewAppError(utils.ErrUserNotFound, "User not found", nil)
 	}
 	return nil
+}
+
+// SubredditTitles represents a lightweight structure for subreddit ID and name
+type SubredditTitles struct {
+	ID   uuid.UUID `bson:"_id" json:"id"`    // Subreddit ID
+	Name string    `bson:"name" json:"name"` // Subreddit name
 }
