@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -140,22 +141,20 @@ func (m *MongoDB) GetUserByEmail(ctx context.Context, email string) (*models.Use
 
 // UpdateUserKarma increments a user's karma score
 func (m *MongoDB) UpdateUserKarma(ctx context.Context, userID uuid.UUID, delta int) error {
-	filter := bson.M{"_id": userID.String()} // Note: Using String() since we store IDs as strings
-	update := bson.M{
-		"$inc": bson.M{
-			"karma": delta,
-		},
-	}
+	log.Printf("Updating karma for user %s by %d in MongoDB", userID, delta)
+
+	filter := bson.M{"_id": userID.String()}
+	update := bson.M{"$inc": bson.M{"karma": delta}}
 
 	result, err := m.Users.UpdateOne(ctx, filter, update)
 	if err != nil {
-		return fmt.Errorf("failed to update user karma: %v", err)
+		return err
 	}
-
 	if result.MatchedCount == 0 {
-		return fmt.Errorf("user not found: %s", userID)
+		return utils.NewAppError(utils.ErrUserNotFound, "User not found", nil)
 	}
 
+	log.Printf("Successfully updated karma for user %s", userID)
 	return nil
 }
 

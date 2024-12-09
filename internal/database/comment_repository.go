@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"gator-swamp/internal/models"
 	"gator-swamp/internal/utils"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +43,8 @@ type VoteDocument struct {
 
 // SaveComment creates or updates a comment in MongoDB
 func (m *MongoDB) SaveComment(ctx context.Context, comment *models.Comment) error {
+	log.Printf("Saving comment with ID: %s", comment.ID.String())
+
 	doc := CommentDocument{
 		ID:        comment.ID.String(),
 		Content:   comment.Content,
@@ -71,22 +74,14 @@ func (m *MongoDB) SaveComment(ctx context.Context, comment *models.Comment) erro
 	filter := bson.M{"_id": doc.ID}
 	update := bson.M{"$set": doc}
 
-	_, err := m.Comments.UpdateOne(ctx, filter, update, opts)
+	result, err := m.Comments.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
+		log.Printf("Error saving comment %s: %v", comment.ID.String(), err)
 		return fmt.Errorf("failed to save comment: %v", err)
 	}
 
-	// If this is a new comment with a parent, update the parent's children array
-	if comment.ParentID != nil {
-		_, err = m.Comments.UpdateOne(
-			ctx,
-			bson.M{"_id": comment.ParentID.String()},
-			bson.M{"$addToSet": bson.M{"children": comment.ID.String()}},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update parent comment: %v", err)
-		}
-	}
+	log.Printf("Successfully saved comment %s. Matched: %d, Modified: %d, Upserted: %d",
+		comment.ID.String(), result.MatchedCount, result.ModifiedCount, result.UpsertedCount)
 
 	return nil
 }
@@ -94,14 +89,21 @@ func (m *MongoDB) SaveComment(ctx context.Context, comment *models.Comment) erro
 // GetComment retrieves a comment by ID
 func (m *MongoDB) GetComment(ctx context.Context, id uuid.UUID) (*models.Comment, error) {
 	var doc CommentDocument
+
+	// Add logging
+	log.Printf("Attempting to find comment with ID: %s", id.String())
+
 	err := m.Comments.FindOne(ctx, bson.M{"_id": id.String()}).Decode(&doc)
 	if err == mongo.ErrNoDocuments {
+		log.Printf("No comment found with ID: %s", id.String())
 		return nil, utils.NewAppError(utils.ErrNotFound, "Comment not found", err)
 	}
 	if err != nil {
+		log.Printf("Error finding comment with ID %s: %v", id.String(), err)
 		return nil, fmt.Errorf("failed to get comment: %v", err)
 	}
 
+	log.Printf("Successfully found comment with ID: %s", id.String())
 	return convertCommentDocumentToModel(&doc)
 }
 
@@ -277,4 +279,46 @@ func (m *MongoDB) SaveCommentVote(ctx context.Context, userID, commentID uuid.UU
 
 	_, err := m.Votes.UpdateOne(ctx, filter, update, opts)
 	return err
+}
+
+// Add this as a temporary fix method in comment_repository.go
+func (m *MongoDB) FixCommentSubreddits(ctx context.Context) error {
+	cursor, err := m.Comments.Find(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("failed to fetch comments: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var comment CommentDocument
+		if err := cursor.Decode(&comment); err != nil {
+			log.Printf("Error decoding comment: %v", err)
+			continue
+		}
+
+		// Get the parent post to get its subredditID
+		var post struct {
+			SubredditID string `bson:"subredditid"`
+		}
+		err := m.Posts.FindOne(ctx, bson.M{"_id": comment.PostID}).Decode(&post)
+		if err != nil {
+			log.Printf("Error finding post for comment %s: %v", comment.ID, err)
+			continue
+		}
+
+		// Update the comment with the subredditID
+		_, err = m.Comments.UpdateOne(
+			ctx,
+			bson.M{"_id": comment.ID},
+			bson.M{"$set": bson.M{"subredditId": post.SubredditID}},
+		)
+		if err != nil {
+			log.Printf("Error updating comment %s: %v", comment.ID, err)
+			continue
+		}
+
+		log.Printf("Updated comment %s with subredditID %s", comment.ID, post.SubredditID)
+	}
+
+	return nil
 }

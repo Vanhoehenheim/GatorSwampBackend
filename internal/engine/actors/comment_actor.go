@@ -73,14 +73,17 @@ func NewCommentActor(enginePID *actor.PID, mongodb *database.MongoDB) actor.Acto
 func (a *CommentActor) Receive(context actor.Context) {
 	switch msg := context.Message().(type) {
 	case *actor.Started:
-		log.Printf("CommentActor started")
+		log.Printf("CommentActor started with PID: %v", context.Self())
 		context.Send(context.Self(), &loadCommentsFromDBMsg{})
 
 	case *loadCommentsFromDBMsg:
+		log.Printf("Loading comments from database")
 		a.handleLoadComments(context)
 
 	case *CreateCommentMsg:
+		log.Printf("Received CreateCommentMsg: %+v", msg)
 		a.handleCreateComment(context, msg)
+		log.Printf("Finished handling CreateCommentMsg")
 
 	case *EditCommentMsg:
 		a.handleEditComment(context, msg)
@@ -161,12 +164,15 @@ func (a *CommentActor) handleLoadComments(context actor.Context) {
 
 	log.Printf("Loaded %d comments from MongoDB", len(a.comments))
 }
-
 func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCommentMsg) {
+	// Add initial logging
+	log.Printf("Creating new comment for post %s by user %s", msg.PostID, msg.AuthorID)
+
 	// First, fetch the post to get its subredditID
 	ctx := stdctx.Background()
 	post, err := a.mongodb.GetPost(ctx, msg.PostID)
 	if err != nil {
+		log.Printf("Error fetching post: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch parent post", err))
 		return
 	}
@@ -179,7 +185,7 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		Content:     msg.Content,
 		AuthorID:    msg.AuthorID,
 		PostID:      msg.PostID,
-		SubredditID: post.SubredditID, // Set the subredditID from the parent post
+		SubredditID: post.SubredditID,
 		ParentID:    msg.ParentID,
 		Children:    make([]uuid.UUID, 0),
 		CreatedAt:   now,
@@ -192,6 +198,7 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 
 	// Save to MongoDB first
 	if err := a.mongodb.SaveComment(ctx, newComment); err != nil {
+		log.Printf("Error saving comment to MongoDB: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save comment", err))
 		return
 	}
@@ -201,7 +208,44 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 	a.postComments[msg.PostID] = append(a.postComments[msg.PostID], commentID)
 	a.commentVotes[commentID] = make(map[uuid.UUID]bool)
 
-	context.Respond(newComment)
+	// Create a response struct that matches the JSON structure
+	response := struct {
+		ID          string    `json:"id"`
+		Content     string    `json:"content"`
+		AuthorID    string    `json:"authorId"`
+		PostID      string    `json:"postId"`
+		SubredditID string    `json:"subredditId"`
+		ParentID    *string   `json:"parentId,omitempty"`
+		Children    []string  `json:"children"`
+		CreatedAt   time.Time `json:"createdAt"`
+		UpdatedAt   time.Time `json:"updatedAt"`
+		IsDeleted   bool      `json:"isDeleted"`
+		Upvotes     int       `json:"upvotes"`
+		Downvotes   int       `json:"downvotes"`
+		Karma       int       `json:"karma"`
+	}{
+		ID:          newComment.ID.String(),
+		Content:     newComment.Content,
+		AuthorID:    newComment.AuthorID.String(),
+		PostID:      newComment.PostID.String(),
+		SubredditID: newComment.SubredditID.String(),
+		Children:    make([]string, 0),
+		CreatedAt:   newComment.CreatedAt,
+		UpdatedAt:   newComment.UpdatedAt,
+		IsDeleted:   newComment.IsDeleted,
+		Upvotes:     newComment.Upvotes,
+		Downvotes:   newComment.Downvotes,
+		Karma:       newComment.Karma,
+	}
+
+	// Handle ParentID if it exists
+	if newComment.ParentID != nil {
+		parentIDStr := newComment.ParentID.String()
+		response.ParentID = &parentIDStr
+	}
+
+	log.Printf("Successfully created comment with ID: %s", commentID)
+	context.Respond(response)
 }
 
 func (a *CommentActor) handleEditComment(context actor.Context, msg *EditCommentMsg) {
@@ -329,10 +373,12 @@ func (a *CommentActor) handleGetPostComments(context actor.Context, msg *GetComm
 }
 
 func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteCommentMsg) {
-	// Get the comment with full details from MongoDB first
+	log.Printf("Processing vote for comment ID: %s by user %s", msg.CommentID, msg.UserID)
+
 	ctx := stdctx.Background()
 	retrievedComment, err := a.mongodb.GetComment(ctx, msg.CommentID)
 	if err != nil {
+		log.Printf("Error retrieving comment: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", err))
 		return
 	}
@@ -379,6 +425,7 @@ func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteComment
 
 	// Update comment votes in MongoDB
 	if err := a.mongodb.UpdateCommentVotes(ctx, msg.CommentID, retrievedComment.Upvotes, retrievedComment.Downvotes); err != nil {
+		log.Printf("Error updating comment votes: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update vote", err))
 		return
 	}
@@ -386,6 +433,8 @@ func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteComment
 	// Update user karma in MongoDB
 	if karmaChange != 0 {
 		log.Printf("Updating karma for user %s by %d points", retrievedComment.AuthorID, karmaChange)
+
+		// First update in MongoDB
 		err := a.mongodb.UpdateUserKarma(ctx, retrievedComment.AuthorID, karmaChange)
 		if err != nil {
 			log.Printf("Failed to update user karma in MongoDB: %v", err)
@@ -393,15 +442,21 @@ func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteComment
 			return
 		}
 
-		// Notify the Engine/UserActor about the karma change
-		context.Send(a.enginePID, &UpdateKarmaMsg{
-			UserID: retrievedComment.AuthorID,
-			Delta:  karmaChange,
-		})
+		// Then notify the Engine about the karma change
+		if a.enginePID != nil {
+			log.Printf("Sending karma update to engine for user %s", retrievedComment.AuthorID)
+			context.Send(a.enginePID, &UpdateKarmaMsg{
+				UserID: retrievedComment.AuthorID,
+				Delta:  karmaChange,
+			})
+		} else {
+			log.Printf("Warning: enginePID is nil, cannot send karma update")
+		}
 	}
 
-	// Update the local cache with the full comment data
+	// Update the local cache
 	a.comments[msg.CommentID] = retrievedComment
 
+	log.Printf("Successfully processed vote. New karma: %d", retrievedComment.Karma)
 	context.Respond(retrievedComment)
 }

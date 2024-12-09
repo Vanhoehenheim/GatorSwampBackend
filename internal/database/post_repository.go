@@ -103,9 +103,11 @@ func (m *MongoDB) GetPost(ctx context.Context, id uuid.UUID) (*models.Post, erro
 
 // GetSubredditPosts retrieves all posts for a given subreddit ID.
 func (m *MongoDB) GetSubredditPosts(ctx context.Context, subredditID uuid.UUID) ([]*models.Post, error) {
+	log.Printf("Querying MongoDB for posts in subreddit: %s", subredditID.String())
+
 	cursor, err := m.Posts.Find(ctx, bson.M{"subredditid": subredditID.String()})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("database query failed: %v", err)
 	}
 	defer cursor.Close(ctx)
 
@@ -113,7 +115,8 @@ func (m *MongoDB) GetSubredditPosts(ctx context.Context, subredditID uuid.UUID) 
 	for cursor.Next(ctx) {
 		var doc PostDocument
 		if err := cursor.Decode(&doc); err != nil {
-			return nil, err
+			log.Printf("Error decoding post document: %v", err)
+			continue
 		}
 
 		post, err := m.DocumentToModel(&doc)
@@ -125,8 +128,10 @@ func (m *MongoDB) GetSubredditPosts(ctx context.Context, subredditID uuid.UUID) 
 	}
 
 	if err := cursor.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cursor iteration failed: %v", err)
 	}
+
+	log.Printf("Found %d posts in subreddit %s", len(posts), subredditID)
 	return posts, nil
 }
 

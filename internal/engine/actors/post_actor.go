@@ -215,17 +215,33 @@ func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
 
 // Handles retrieving all posts for a subreddit
 func (a *PostActor) handleGetSubredditPosts(context actor.Context, msg *GetSubredditPostsMsg) {
-	if postIDs, exists := a.subredditPosts[msg.SubredditID]; exists {
-		posts := make([]*models.Post, 0, len(postIDs))
-		for _, postID := range postIDs {
-			if post := a.postsByID[postID]; post != nil {
-				posts = append(posts, post)
-			}
-		}
-		context.Respond(posts)
-	} else {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "No posts found", nil))
+	log.Printf("Fetching posts for subreddit: %s", msg.SubredditID)
+
+	// Query MongoDB directly for the latest data
+	ctx := stdctx.Background()
+	posts, err := a.mongodb.GetSubredditPosts(ctx, msg.SubredditID)
+	if err != nil {
+		log.Printf("Error fetching subreddit posts: %v", err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch subreddit posts", err))
+		return
 	}
+
+	if len(posts) == 0 {
+		log.Printf("No posts found for subreddit: %s", msg.SubredditID)
+		context.Respond([]*models.Post{}) // Return empty array instead of error
+		return
+	}
+
+	// Update local cache with fetched posts
+	for _, post := range posts {
+		a.postsByID[post.ID] = post
+		if _, exists := a.postVotes[post.ID]; !exists {
+			a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
+		}
+	}
+
+	log.Printf("Found %d posts for subreddit: %s", len(posts), msg.SubredditID)
+	context.Respond(posts)
 }
 
 // Handles voting on a post

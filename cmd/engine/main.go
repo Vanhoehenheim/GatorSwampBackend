@@ -9,11 +9,12 @@ import (
 	"gator-swamp/internal/database"
 	"gator-swamp/internal/engine"        // Engine for managing actors
 	"gator-swamp/internal/engine/actors" // For UserActors, SubredditActors, and PostActors
-	"gator-swamp/internal/utils"         // Utility functions and metrics
-	"log"                                // Logging
-	"net/http"                           // HTTP server
-	"strconv"                            // String conversion utilities
-	"time"                               // Time utilities
+	"gator-swamp/internal/models"
+	"gator-swamp/internal/utils" // Utility functions and metrics
+	"log"                        // Logging
+	"net/http"                   // HTTP server
+	"strconv"                    // String conversion utilities
+	"time"                       // Time utilities
 
 	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
 	"github.com/google/uuid"                  // UUID generation for unique identifiers
@@ -409,6 +410,7 @@ func (s *Server) handleSubredditMembers() http.HandlerFunc {
 }
 
 // handlePost handles post-related requests, such as creating a new post
+// handlePost handles post-related requests, such as creating a new post
 func (s *Server) handlePost() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -467,7 +469,7 @@ func (s *Server) handlePost() http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(result)
 
-			// get post by post ID or subreddit ID
+		// get post by post ID or subreddit ID
 		case http.MethodGet:
 			postID := r.URL.Query().Get("id")
 			subredditID := r.URL.Query().Get("subredditId")
@@ -516,12 +518,14 @@ func (s *Server) handlePost() http.HandlerFunc {
 					return
 				}
 
+				log.Printf("Fetching posts for subreddit: %s", id)
 				future := s.context.RequestFuture(s.engine.GetPostActor(),
 					&actors.GetSubredditPostsMsg{SubredditID: id},
 					5*time.Second)
 
 				result, err := future.Result()
 				if err != nil {
+					log.Printf("Error getting subreddit posts: %v", err)
 					http.Error(w, fmt.Sprintf("Failed to get subreddit posts: %v", err), http.StatusInternalServerError)
 					return
 				}
@@ -541,8 +545,21 @@ func (s *Server) handlePost() http.HandlerFunc {
 					return
 				}
 
+				// Check if we got an empty result
+				posts, ok := result.([]*models.Post)
+				if ok && len(posts) == 0 {
+					// Return empty array instead of error for no posts
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode([]*models.Post{})
+					return
+				}
+
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(result)
+				if err := json.NewEncoder(w).Encode(result); err != nil {
+					log.Printf("Error encoding response: %v", err)
+					http.Error(w, "Error encoding response", http.StatusInternalServerError)
+					return
+				}
 				return
 			}
 
