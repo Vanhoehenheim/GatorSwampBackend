@@ -46,17 +46,18 @@ func (m *MongoDB) SaveComment(ctx context.Context, comment *models.Comment) erro
 	log.Printf("Saving comment with ID: %s", comment.ID.String())
 
 	doc := CommentDocument{
-		ID:        comment.ID.String(),
-		Content:   comment.Content,
-		AuthorID:  comment.AuthorID.String(),
-		PostID:    comment.PostID.String(),
-		Children:  make([]string, len(comment.Children)),
-		CreatedAt: comment.CreatedAt,
-		UpdatedAt: comment.UpdatedAt,
-		IsDeleted: comment.IsDeleted,
-		Upvotes:   comment.Upvotes,
-		Downvotes: comment.Downvotes,
-		Karma:     comment.Karma,
+		ID:          comment.ID.String(),
+		Content:     comment.Content,
+		AuthorID:    comment.AuthorID.String(),
+		PostID:      comment.PostID.String(),
+		Children:    make([]string, len(comment.Children)),
+		CreatedAt:   comment.CreatedAt,
+		UpdatedAt:   comment.UpdatedAt,
+		IsDeleted:   comment.IsDeleted,
+		Upvotes:     comment.Upvotes,
+		Downvotes:   comment.Downvotes,
+		Karma:       comment.Karma,
+		SubredditID: comment.SubredditID.String(),
 	}
 
 	// Convert Children UUIDs to strings
