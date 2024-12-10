@@ -29,15 +29,16 @@ type Subreddit struct {
 }
 
 type Post struct {
-	ID          uuid.UUID
-	Title       string
-	Content     string
-	AuthorID    uuid.UUID
-	SubredditID uuid.UUID
-	CreatedAt   time.Time
-	Upvotes     int
-	Downvotes   int
-	Karma       int // Add Karma field to track post karma
+	ID             uuid.UUID
+	Title          string
+	Content        string
+	AuthorID       uuid.UUID
+	AuthorUsername string
+	SubredditID    uuid.UUID
+	CreatedAt      time.Time
+	Upvotes        int
+	Downvotes      int
+	Karma          int // Add Karma field to track post karma
 }
 
 // Comment represents a comment on a post or another comment

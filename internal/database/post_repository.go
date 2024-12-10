@@ -17,29 +17,31 @@ import (
 
 // PostDocument represents the MongoDB schema for a post.
 type PostDocument struct {
-	ID          string    `bson:"_id"`         // MongoDB primary key
-	Title       string    `bson:"title"`       // Post title
-	Content     string    `bson:"content"`     // Post content
-	AuthorID    string    `bson:"authorid"`    // ID of the author
-	SubredditID string    `bson:"subredditid"` // ID of the subreddit
-	CreatedAt   time.Time `bson:"createdat"`   // Post creation time
-	Upvotes     int       `bson:"upvotes"`     // Number of upvotes
-	Downvotes   int       `bson:"downvotes"`   // Number of downvotes
-	Karma       int       `bson:"karma"`       // Calculated karma (upvotes - downvotes)
+	ID             string    `bson:"_id"`      // MongoDB primary key
+	Title          string    `bson:"title"`    // Post title
+	Content        string    `bson:"content"`  // Post content
+	AuthorID       string    `bson:"authorid"` // ID of the author
+	AuthorUsername string    `bson:"authorusername"`
+	SubredditID    string    `bson:"subredditid"` // ID of the subreddit
+	CreatedAt      time.Time `bson:"createdat"`   // Post creation time
+	Upvotes        int       `bson:"upvotes"`     // Number of upvotes
+	Downvotes      int       `bson:"downvotes"`   // Number of downvotes
+	Karma          int       `bson:"karma"`       // Calculated karma (upvotes - downvotes)
 }
 
 // ModelToDocument converts a Post model to a MongoDB document.
 func (m *MongoDB) ModelToDocument(post *models.Post) *PostDocument {
 	return &PostDocument{
-		ID:          post.ID.String(),
-		Title:       post.Title,
-		Content:     post.Content,
-		AuthorID:    post.AuthorID.String(),
-		SubredditID: post.SubredditID.String(),
-		CreatedAt:   post.CreatedAt,
-		Upvotes:     post.Upvotes,
-		Downvotes:   post.Downvotes,
-		Karma:       post.Karma,
+		ID:             post.ID.String(),
+		Title:          post.Title,
+		Content:        post.Content,
+		AuthorID:       post.AuthorID.String(),
+		AuthorUsername: post.AuthorUsername,
+		SubredditID:    post.SubredditID.String(),
+		CreatedAt:      post.CreatedAt,
+		Upvotes:        post.Upvotes,
+		Downvotes:      post.Downvotes,
+		Karma:          post.Karma,
 	}
 }
 
@@ -61,15 +63,16 @@ func (m *MongoDB) DocumentToModel(doc *PostDocument) (*models.Post, error) {
 	}
 
 	return &models.Post{
-		ID:          id,
-		Title:       doc.Title,
-		Content:     doc.Content,
-		AuthorID:    authorID,
-		SubredditID: subredditID,
-		CreatedAt:   doc.CreatedAt,
-		Upvotes:     doc.Upvotes,
-		Downvotes:   doc.Downvotes,
-		Karma:       doc.Karma,
+		ID:             id,
+		Title:          doc.Title,
+		Content:        doc.Content,
+		AuthorID:       authorID,
+		AuthorUsername: doc.AuthorUsername,
+		SubredditID:    subredditID,
+		CreatedAt:      doc.CreatedAt,
+		Upvotes:        doc.Upvotes,
+		Downvotes:      doc.Downvotes,
+		Karma:          doc.Karma,
 	}, nil
 }
 

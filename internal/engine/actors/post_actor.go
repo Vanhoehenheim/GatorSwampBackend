@@ -151,34 +151,33 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 	startTime := time.Now()
 	ctx := stdctx.Background()
 
+	// Fetch the user to get their username
+	user, err := a.mongodb.GetUser(ctx, msg.AuthorID)
+	if err != nil {
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch author details", err))
+		return
+	}
+
 	newPost := &models.Post{
-		ID:          uuid.New(),
-		Title:       msg.Title,
-		Content:     msg.Content,
-		AuthorID:    msg.AuthorID,
-		SubredditID: msg.SubredditID,
-		CreatedAt:   time.Now(),
-		Upvotes:     0,
-		Downvotes:   0,
-		Karma:       0,
+		ID:             uuid.New(),
+		Title:          msg.Title,
+		Content:        msg.Content,
+		AuthorID:       msg.AuthorID,
+		AuthorUsername: user.Username,
+		SubredditID:    msg.SubredditID,
+		CreatedAt:      time.Now(),
+		Upvotes:        0,
+		Downvotes:      0,
+		Karma:          0,
 	}
 
 	postDoc := a.mongodb.ModelToDocument(newPost)
-
 	if _, err := a.mongodb.Posts.InsertOne(ctx, postDoc); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save post", err))
 		return
 	}
 
-	err := a.mongodb.UpdateSubredditPosts(ctx, msg.SubredditID, newPost.ID, true)
-	if err != nil {
-		if _, deleteErr := a.mongodb.Posts.DeleteOne(ctx, bson.M{"_id": postDoc.ID}); deleteErr != nil {
-			log.Printf("Failed to delete post after subreddit update failure: %v", deleteErr)
-		}
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update subreddit posts", err))
-		return
-	}
-
+	// Update local caches and respond as before
 	a.postsByID[newPost.ID] = newPost
 	a.postVotes[newPost.ID] = make(map[uuid.UUID]voteStatus)
 	a.subredditPosts[msg.SubredditID] = append(a.subredditPosts[msg.SubredditID], newPost.ID)
