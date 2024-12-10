@@ -973,6 +973,47 @@ func (s *Server) handleComment() http.HandlerFunc {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]bool{"success": result.(bool)})
+
+		case http.MethodGet:
+			commentID := r.URL.Query().Get("commentId")
+			if commentID == "" {
+				http.Error(w, "Missing comment ID", http.StatusBadRequest)
+				return
+			}
+
+			cID, err := uuid.Parse(commentID)
+			if err != nil {
+				http.Error(w, "Invalid comment ID", http.StatusBadRequest)
+				return
+			}
+
+			future := s.context.RequestFuture(s.commentActor, &actors.GetCommentMsg{
+				CommentID: cID,
+			}, 5*time.Second)
+
+			result, err := future.Result()
+			if err != nil {
+				http.Error(w, "Failed to get comment", http.StatusInternalServerError)
+				return
+			}
+
+			// Check for application errors
+			if appErr, ok := result.(*utils.AppError); ok {
+				var statusCode int
+				switch appErr.Code {
+				case utils.ErrNotFound:
+					statusCode = http.StatusNotFound
+				case utils.ErrDatabase:
+					statusCode = http.StatusInternalServerError
+				default:
+					statusCode = http.StatusInternalServerError
+				}
+				http.Error(w, appErr.Error(), statusCode)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
 		}
 	}
 }
