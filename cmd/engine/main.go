@@ -664,7 +664,6 @@ func (s *Server) handleUserProfile() http.HandlerFunc {
 			return
 		}
 
-		// Get userID from query parameters
 		userIDStr := r.URL.Query().Get("userId")
 		if userIDStr == "" {
 			http.Error(w, "User ID required", http.StatusBadRequest)
@@ -677,7 +676,6 @@ func (s *Server) handleUserProfile() http.HandlerFunc {
 			return
 		}
 
-		// Request user profile from UserSupervisor through Engine
 		future := s.context.RequestFuture(
 			s.engine.GetUserSupervisor(),
 			&actors.GetUserProfileMsg{UserID: userID},
@@ -695,8 +693,40 @@ func (s *Server) handleUserProfile() http.HandlerFunc {
 			return
 		}
 
+		userState, ok := result.(*actors.UserState)
+		if !ok {
+			http.Error(w, "Invalid response type", http.StatusInternalServerError)
+			return
+		}
+
+		// Create response in the format you requested
+		response := struct {
+			ID            string    `json:"id"`
+			Username      string    `json:"username"`
+			Email         string    `json:"email"`
+			Karma         int       `json:"karma"`
+			IsConnected   bool      `json:"isConnected"`
+			LastActive    time.Time `json:"lastActive"`
+			SubredditID   []string  `json:"subredditID"`
+			SubredditName []string  `json:"subredditName"`
+		}{
+			ID:          userState.ID.String(),
+			Username:    userState.Username,
+			Email:       userState.Email,
+			Karma:       userState.Karma,
+			IsConnected: userState.IsConnected,
+			LastActive:  userState.LastActive,
+		}
+
+		// Convert UUID slices to string slices
+		response.SubredditID = make([]string, len(userState.Subreddits))
+		for i, id := range userState.Subreddits {
+			response.SubredditID[i] = id.String()
+		}
+		response.SubredditName = userState.SubredditNames
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		json.NewEncoder(w).Encode(response)
 	}
 }
 

@@ -105,6 +105,7 @@ type UserState struct {
 	HashedPassword string
 	AuthToken      string
 	Subreddits     []uuid.UUID
+	SubredditNames []string // New field
 	VotedPosts     map[uuid.UUID]bool
 	VotedComments  map[uuid.UUID]bool
 }
@@ -202,26 +203,47 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		// Respond with the login result (token or error)
 		context.Respond(result)
 
-	// Handle user profile retrieval
+		// Handle user profile retrieval
 	case *GetUserProfileMsg:
-		log.Printf("UserSupervisor: Getting profile for user ID: %s", msg.UserID)
-
-		// Ensure we have an actor for the user
-		pid, err := s.getOrCreateUserActor(context, msg.UserID)
+		ctx := stdctx.Background()
+		user, err := s.mongodb.GetUser(ctx, msg.UserID)
 		if err != nil {
-			log.Printf("UserSupervisor: Failed to get/create user actor: %v", err)
-			context.Respond(utils.NewAppError(utils.ErrNotFound, "User not found", err))
+			if utils.IsErrorCode(err, utils.ErrUserNotFound) {
+				context.Respond(nil)
+				return
+			}
+			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch user", err))
 			return
 		}
 
-		// Request user profile from the user actor
-		future := context.RequestFuture(pid, msg, 5*time.Second)
-		result, err := future.Result()
-		if err != nil {
-			context.Respond(utils.NewAppError(utils.ErrActorTimeout, "Failed to get profile", err))
-			return
+		// Get the names of all subreddits
+		subredditNames := make([]string, 0, len(user.Subreddits))
+		for _, subID := range user.Subreddits {
+			subreddit, err := s.mongodb.GetSubredditByID(ctx, subID)
+			if err != nil {
+				log.Printf("Error fetching subreddit %s: %v", subID, err)
+				continue
+			}
+			subredditNames = append(subredditNames, subreddit.Name)
 		}
-		context.Respond(result)
+
+		// We don't have access to VotedPosts and VotedComments here
+		// Those would need to come from the UserActor's state
+		response := &UserState{
+			ID:             user.ID,
+			Username:       user.Username,
+			Email:          user.Email,
+			Karma:          user.Karma,
+			IsConnected:    user.IsConnected,
+			LastActive:     user.LastActive,
+			Subreddits:     user.Subreddits,
+			SubredditNames: subredditNames,
+			// Initialize empty maps for voted posts/comments
+			VotedPosts:    make(map[uuid.UUID]bool),
+			VotedComments: make(map[uuid.UUID]bool),
+		}
+
+		context.Respond(response)
 
 	// Handle karma updates
 	case *UpdateKarmaMsg:
