@@ -172,6 +172,7 @@ func main() {
 	http.HandleFunc("/messages/conversation", corsMiddleware(server.handleConversation()))
 	http.HandleFunc("/messages/read", corsMiddleware(server.handleMarkMessageRead()))
 	http.HandleFunc("/comment/vote", corsMiddleware(server.handleCommentVote()))
+	http.HandleFunc("/posts/recent", corsMiddleware(server.handleRecentPosts()))
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
@@ -1214,6 +1215,37 @@ func (s *Server) handleCommentVote() http.HandlerFunc {
 		result, err := future.Result()
 		if err != nil {
 			http.Error(w, "Failed to process vote", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+func (s *Server) handleRecentPosts() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Send request to PostActor through Engine
+		future := s.context.RequestFuture(
+			s.engine.GetPostActor(),
+			&actors.GetRecentPostsMsg{Limit: 10},
+			5*time.Second,
+		)
+
+		result, err := future.Result()
+		if err != nil {
+			http.Error(w, "Failed to fetch recent posts", http.StatusInternalServerError)
+			return
+		}
+
+		// Check for application errors
+		if appErr, ok := result.(*utils.AppError); ok {
+			http.Error(w, appErr.Error(), http.StatusInternalServerError)
 			return
 		}
 

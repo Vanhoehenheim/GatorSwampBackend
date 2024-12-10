@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // Message types for Post operations
@@ -56,6 +57,10 @@ type (
 	voteStatus struct {
 		IsUpvote bool
 		VotedAt  time.Time
+	}
+
+	GetRecentPostsMsg struct {
+		Limit int
 	}
 )
 
@@ -108,6 +113,8 @@ func (a *PostActor) Receive(context actor.Context) {
 
 	case *GetUserFeedMsg:
 		a.handleGetUserFeed(context, msg)
+	case *GetRecentPostsMsg:
+		a.handleGetRecentPosts(context, msg)
 
 	default:
 		log.Printf("PostActor: Unknown message type: %T", msg)
@@ -343,4 +350,44 @@ func (a *PostActor) handleGetUserFeed(context actor.Context, msg *GetUserFeedMsg
 
 	a.metrics.AddOperationLatency("get_feed", time.Since(startTime))
 	context.Respond(feedPosts)
+}
+
+func (a *PostActor) handleGetRecentPosts(context actor.Context, msg *GetRecentPostsMsg) {
+	ctx := stdctx.Background()
+
+	// Set up options for sorting by creation date
+	opts := options.Find().
+		SetSort(bson.D{{Key: "createdat", Value: -1}}).
+		SetLimit(int64(msg.Limit))
+
+	// Query MongoDB for recent posts
+	cursor, err := a.mongodb.Posts.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch recent posts", err))
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var posts []*models.Post
+	for cursor.Next(ctx) {
+		var doc database.PostDocument
+		if err := cursor.Decode(&doc); err != nil {
+			log.Printf("Error decoding post document: %v", err)
+			continue
+		}
+
+		post, err := a.mongodb.DocumentToModel(&doc)
+		if err != nil {
+			log.Printf("Error converting document to model: %v", err)
+			continue
+		}
+		posts = append(posts, post)
+	}
+
+	if err := cursor.Err(); err != nil {
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Error reading posts", err))
+		return
+	}
+
+	context.Respond(posts)
 }
