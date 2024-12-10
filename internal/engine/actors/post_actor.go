@@ -158,6 +158,13 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		return
 	}
 
+	// Fetch the subreddit to get its name
+	subreddit, err := a.mongodb.GetSubredditByID(ctx, msg.SubredditID)
+	if err != nil {
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch subreddit details", err))
+		return
+	}
+
 	newPost := &models.Post{
 		ID:             uuid.New(),
 		Title:          msg.Title,
@@ -165,6 +172,7 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		AuthorID:       msg.AuthorID,
 		AuthorUsername: user.Username,
 		SubredditID:    msg.SubredditID,
+		SubredditName:  subreddit.Name,
 		CreatedAt:      time.Now(),
 		Upvotes:        0,
 		Downvotes:      0,

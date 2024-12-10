@@ -35,6 +35,7 @@ type Post struct {
 	AuthorID       uuid.UUID
 	AuthorUsername string
 	SubredditID    uuid.UUID
+	SubredditName  string
 	CreatedAt      time.Time
 	Upvotes        int
 	Downvotes      int

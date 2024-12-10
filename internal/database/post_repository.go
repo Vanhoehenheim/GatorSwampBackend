@@ -17,16 +17,17 @@ import (
 
 // PostDocument represents the MongoDB schema for a post.
 type PostDocument struct {
-	ID             string    `bson:"_id"`      // MongoDB primary key
-	Title          string    `bson:"title"`    // Post title
-	Content        string    `bson:"content"`  // Post content
-	AuthorID       string    `bson:"authorid"` // ID of the author
+	ID             string    `bson:"_id"`
+	Title          string    `bson:"title"`
+	Content        string    `bson:"content"`
+	AuthorID       string    `bson:"authorid"`
 	AuthorUsername string    `bson:"authorusername"`
-	SubredditID    string    `bson:"subredditid"` // ID of the subreddit
-	CreatedAt      time.Time `bson:"createdat"`   // Post creation time
-	Upvotes        int       `bson:"upvotes"`     // Number of upvotes
-	Downvotes      int       `bson:"downvotes"`   // Number of downvotes
-	Karma          int       `bson:"karma"`       // Calculated karma (upvotes - downvotes)
+	SubredditID    string    `bson:"subredditid"`
+	SubredditName  string    `bson:"subredditname"`
+	CreatedAt      time.Time `bson:"createdat"`
+	Upvotes        int       `bson:"upvotes"`
+	Downvotes      int       `bson:"downvotes"`
+	Karma          int       `bson:"karma"`
 }
 
 // ModelToDocument converts a Post model to a MongoDB document.
@@ -38,6 +39,7 @@ func (m *MongoDB) ModelToDocument(post *models.Post) *PostDocument {
 		AuthorID:       post.AuthorID.String(),
 		AuthorUsername: post.AuthorUsername,
 		SubredditID:    post.SubredditID.String(),
+		SubredditName:  post.SubredditName,
 		CreatedAt:      post.CreatedAt,
 		Upvotes:        post.Upvotes,
 		Downvotes:      post.Downvotes,
@@ -69,6 +71,7 @@ func (m *MongoDB) DocumentToModel(doc *PostDocument) (*models.Post, error) {
 		AuthorID:       authorID,
 		AuthorUsername: doc.AuthorUsername,
 		SubredditID:    subredditID,
+		SubredditName:  doc.SubredditName,
 		CreatedAt:      doc.CreatedAt,
 		Upvotes:        doc.Upvotes,
 		Downvotes:      doc.Downvotes,
