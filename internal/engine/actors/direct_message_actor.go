@@ -93,32 +93,52 @@ func (a *DirectMessageActor) handleSendMessage(context actor.Context, msg *SendD
 }
 
 func (a *DirectMessageActor) handleGetUserMessages(context actor.Context, msg *GetUserMessagesMsg) {
-	// Get messages from MongoDB in the background
-	go func() {
-		ctx := stdctx.Background()
-		messages, err := a.mongodb.GetMessagesByUser(ctx, msg.UserID)
-		if err != nil {
-			log.Printf("Failed to get messages from MongoDB: %v", err)
-		}
-		// Update in-memory cache with MongoDB data
-		for _, message := range messages {
-			a.messages[message.ID] = message
-		}
-	}()
-
-	if conversations, exists := a.userMessages[msg.UserID]; exists {
-		var allMessages []*models.DirectMessage
-		for _, messages := range conversations {
-			for _, message := range messages {
-				if !message.IsDeleted {
-					allMessages = append(allMessages, message)
-				}
-			}
-		}
-		context.Respond(allMessages)
-	} else {
+	// Use a foreground MongoDB fetch instead of background
+	ctx := stdctx.Background()
+	messages, err := a.mongodb.GetMessagesByUser(ctx, msg.UserID)
+	if err != nil {
+		log.Printf("Failed to get messages from MongoDB: %v", err)
 		context.Respond([]*models.DirectMessage{})
+		return
 	}
+
+	// Update in-memory cache with MongoDB data
+	for _, message := range messages {
+		a.messages[message.ID] = message
+
+		// Initialize user message maps if they don't exist
+		if _, exists := a.userMessages[message.FromID]; !exists {
+			a.userMessages[message.FromID] = make(map[uuid.UUID][]*models.DirectMessage)
+		}
+		if _, exists := a.userMessages[message.ToID]; !exists {
+			a.userMessages[message.ToID] = make(map[uuid.UUID][]*models.DirectMessage)
+		}
+
+		// Update conversation mappings
+		if message.FromID == msg.UserID {
+			a.userMessages[message.FromID][message.ToID] = append(
+				a.userMessages[message.FromID][message.ToID],
+				message,
+			)
+		}
+		if message.ToID == msg.UserID {
+			a.userMessages[message.ToID][message.FromID] = append(
+				a.userMessages[message.ToID][message.FromID],
+				message,
+			)
+		}
+	}
+
+	// Filter out deleted messages and return the result
+	var activeMessages []*models.DirectMessage
+	for _, message := range messages {
+		if !message.IsDeleted {
+			activeMessages = append(activeMessages, message)
+		}
+	}
+
+	log.Printf("Found %d active messages for user %s", len(activeMessages), msg.UserID)
+	context.Respond(activeMessages)
 }
 
 func (a *DirectMessageActor) handleGetConversation(context actor.Context, msg *GetConversationMsg) {
