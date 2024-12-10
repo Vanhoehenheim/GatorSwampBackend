@@ -888,7 +888,7 @@ func (s *Server) handleComment() http.HandlerFunc {
 				AuthorID: authorID,
 				PostID:   postID,
 				ParentID: parentID,
-			}, 5*time.Second)
+			}, 10*time.Second)
 
 			result, err := future.Result()
 			if err != nil {

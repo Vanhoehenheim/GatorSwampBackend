@@ -179,6 +179,7 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 
 	now := time.Now()
 	commentID := uuid.New()
+	log.Printf("Generated new comment ID: %s", commentID)
 
 	newComment := &models.Comment{
 		ID:          commentID,
@@ -195,20 +196,48 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		Downvotes:   0,
 		Karma:       0,
 	}
+	if msg.ParentID != nil {
+		log.Printf("This is a reply to comment ID: %s", msg.ParentID.String())
 
-	// Save to MongoDB first
+		parentComment, err := a.mongodb.GetComment(ctx, *msg.ParentID)
+		if err != nil {
+			log.Printf("Error fetching parent comment: %v", err)
+			if utils.IsErrorCode(err, utils.ErrNotFound) {
+				context.Respond(utils.NewAppError(utils.ErrNotFound, "Parent comment not found", nil))
+			} else {
+				context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch parent comment", err))
+			}
+			return
+		}
+
+		// Update parent's children array
+		parentComment.Children = append(parentComment.Children, commentID)
+		parentComment.UpdatedAt = now
+
+		// Save updated parent comment
+		if err := a.mongodb.SaveComment(ctx, parentComment); err != nil {
+			log.Printf("Error updating parent comment: %v", err)
+			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update parent comment", err))
+			return
+		}
+
+		// Update cache
+		a.comments[parentComment.ID] = parentComment
+	}
+
+	// Save the new comment
 	if err := a.mongodb.SaveComment(ctx, newComment); err != nil {
 		log.Printf("Error saving comment to MongoDB: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save comment", err))
 		return
 	}
 
-	// Update local state after successful MongoDB save
+	// Update local cache for the new comment
 	a.comments[commentID] = newComment
 	a.postComments[msg.PostID] = append(a.postComments[msg.PostID], commentID)
 	a.commentVotes[commentID] = make(map[uuid.UUID]bool)
 
-	// Create a response struct that matches the JSON structure
+	// Create response
 	response := struct {
 		ID          string    `json:"id"`
 		Content     string    `json:"content"`
@@ -238,7 +267,6 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		Karma:       newComment.Karma,
 	}
 
-	// Handle ParentID if it exists
 	if newComment.ParentID != nil {
 		parentIDStr := newComment.ParentID.String()
 		response.ParentID = &parentIDStr
@@ -247,6 +275,8 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 	log.Printf("Successfully created comment with ID: %s", commentID)
 	context.Respond(response)
 }
+
+// If this is a reply to another comment, update the parent comment's children array
 
 func (a *CommentActor) handleEditComment(context actor.Context, msg *EditCommentMsg) {
 	comment, exists := a.comments[msg.CommentID]
