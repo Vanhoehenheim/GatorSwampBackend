@@ -252,8 +252,7 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		s.mu.RUnlock()
 
 		if !exists {
-			log.Printf("UserSupervisor: User %s not found for karma update", msg.UserID)
-			return
+			log.Printf("UserSupervisor: User %s not found for karma update in userstate", msg.UserID)
 		}
 
 		// Update MongoDB first
@@ -265,8 +264,11 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		}
 
 		// Then update the actor's state
-		log.Printf("UserSupervisor: Forwarding karma update to user actor %s", msg.UserID)
-		context.Send(pid, msg)
+
+		if exists {
+			log.Printf("UserSupervisor: Forwarding karma update to user actor %s", msg.UserID)
+			context.Send(pid, msg)
+		}
 	}
 }
 

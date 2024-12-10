@@ -392,25 +392,32 @@ func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteComment
 		a.commentVotes[msg.CommentID] = make(map[uuid.UUID]bool)
 	}
 
-	previousVote, voted := a.commentVotes[msg.CommentID][msg.UserID]
+	previousVote, hasVoted := a.commentVotes[msg.CommentID][msg.UserID]
 	karmaChange := 0
 
-	if voted {
+	if hasVoted {
 		if previousVote == msg.IsUpvote {
 			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
 			return
 		}
 
-		if msg.IsUpvote {
-			retrievedComment.Downvotes--
-			retrievedComment.Upvotes++
-			karmaChange = 2
-		} else {
+		// First, reverse the previous vote
+		if previousVote {
 			retrievedComment.Upvotes--
+		} else {
+			retrievedComment.Downvotes--
+		}
+
+		// Then add the new vote
+		if msg.IsUpvote {
+			retrievedComment.Upvotes++
+			karmaChange = 2 // +1 for removing downvote, +1 for adding upvote
+		} else {
 			retrievedComment.Downvotes++
-			karmaChange = -2
+			karmaChange = -2 // -1 for removing upvote, -1 for adding downvote
 		}
 	} else {
+		// New vote
 		if msg.IsUpvote {
 			retrievedComment.Upvotes++
 			karmaChange = 1
@@ -433,15 +440,6 @@ func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteComment
 	// Update user karma in MongoDB
 	if karmaChange != 0 {
 		log.Printf("Updating karma for user %s by %d points", retrievedComment.AuthorID, karmaChange)
-
-		// First update in MongoDB
-		err := a.mongodb.UpdateUserKarma(ctx, retrievedComment.AuthorID, karmaChange)
-		if err != nil {
-			log.Printf("Failed to update user karma in MongoDB: %v", err)
-			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update user karma", err))
-			return
-		}
-
 		// Then notify the Engine about the karma change
 		if a.enginePID != nil {
 			log.Printf("Sending karma update to engine for user %s", retrievedComment.AuthorID)

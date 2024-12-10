@@ -133,15 +133,13 @@ func (m *MongoDB) GetPostComments(ctx context.Context, postID uuid.UUID) ([]*mod
 }
 
 // UpdateCommentVotes updates the vote counts and karma for a comment
-func (m *MongoDB) UpdateCommentVotes(ctx context.Context, commentID uuid.UUID, upvoteDelta, downvoteDelta int) error {
+func (m *MongoDB) UpdateCommentVotes(ctx context.Context, commentID uuid.UUID, upvotes, downvotes int) error {
 	filter := bson.M{"_id": commentID.String()}
 	update := bson.M{
-		"$inc": bson.M{
-			"upvotes":   upvoteDelta,
-			"downvotes": downvoteDelta,
-			"karma":     upvoteDelta - downvoteDelta,
-		},
 		"$set": bson.M{
+			"upvotes":   upvotes,
+			"downvotes": downvotes,
+			"karma":     upvotes - downvotes,
 			"updatedAt": time.Now(),
 		},
 	}
