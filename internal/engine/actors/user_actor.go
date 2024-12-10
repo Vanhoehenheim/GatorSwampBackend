@@ -490,6 +490,7 @@ func (a *UserActor) Receive(context actor.Context) {
 		context.Respond(&types.LoginResponse{
 			Success: true,
 			Token:   token,
+			UserID:  user.ID.String(),
 		})
 
 	// Handle voting (upvotes/downvotes on posts or comments)
