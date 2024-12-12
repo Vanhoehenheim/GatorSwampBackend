@@ -232,17 +232,80 @@ func (s *Server) handleSubreddits() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			// Handle listing all subreddits
-			future := s.context.RequestFuture(s.engine.GetSubredditActor(), &actors.ListSubredditsMsg{}, 5*time.Second)
-			result, err := future.Result()
-			if err != nil {
-				http.Error(w, "Failed to get subreddits", http.StatusInternalServerError)
+			// Check query parameters
+			name := r.URL.Query().Get("name")
+			id := r.URL.Query().Get("id")
+
+			// If neither parameter is provided, list all subreddits
+			if name == "" && id == "" {
+				future := s.context.RequestFuture(s.engine.GetSubredditActor(), &actors.ListSubredditsMsg{}, 5*time.Second)
+				result, err := future.Result()
+				if err != nil {
+					http.Error(w, "Failed to get subreddits", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(result)
 				return
 			}
 
-			// Respond with the list of subreddits
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(result)
+			// If ID is provided
+			if id != "" {
+				subredditID, err := uuid.Parse(id)
+				if err != nil {
+					http.Error(w, "Invalid subreddit ID format", http.StatusBadRequest)
+					return
+				}
+
+				future := s.context.RequestFuture(s.engine.GetSubredditActor(),
+					&actors.GetSubredditByIDMsg{SubredditID: subredditID},
+					5*time.Second)
+
+				result, err := future.Result()
+				if err != nil {
+					http.Error(w, "Failed to get subreddit", http.StatusInternalServerError)
+					return
+				}
+
+				if appErr, ok := result.(*utils.AppError); ok {
+					if appErr.Code == utils.ErrNotFound {
+						http.Error(w, "Subreddit not found", http.StatusNotFound)
+					} else {
+						http.Error(w, appErr.Error(), http.StatusInternalServerError)
+					}
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(result)
+				return
+			}
+
+			// If name is provided
+			if name != "" {
+				future := s.context.RequestFuture(s.engine.GetSubredditActor(),
+					&actors.GetSubredditByNameMsg{Name: name},
+					5*time.Second)
+
+				result, err := future.Result()
+				if err != nil {
+					http.Error(w, "Failed to get subreddit", http.StatusInternalServerError)
+					return
+				}
+
+				if appErr, ok := result.(*utils.AppError); ok {
+					if appErr.Code == utils.ErrNotFound {
+						http.Error(w, "Subreddit not found", http.StatusNotFound)
+					} else {
+						http.Error(w, appErr.Error(), http.StatusInternalServerError)
+					}
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(result)
+				return
+			}
 
 		case http.MethodPost:
 			var req CreateSubredditRequest

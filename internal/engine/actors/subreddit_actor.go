@@ -20,10 +20,6 @@ type (
 		CreatorID   uuid.UUID
 	}
 
-	GetSubredditMsg struct {
-		Name string
-	}
-
 	JoinSubredditMsg struct {
 		SubredditID uuid.UUID
 		UserID      uuid.UUID
@@ -40,8 +36,12 @@ type (
 		SubredditID uuid.UUID
 	}
 
-	GetSubredditDetailsMsg struct {
+	GetSubredditByIDMsg struct {
 		SubredditID uuid.UUID
+	}
+
+	GetSubredditByNameMsg struct {
+		Name string
 	}
 )
 
@@ -84,8 +84,8 @@ func (a *SubredditActor) Receive(context actor.Context) {
 	case *CreateSubredditMsg:
 		a.handleCreateSubreddit(context, msg)
 
-	case *GetSubredditMsg:
-		a.handleGetSubreddit(context, msg)
+	case *GetSubredditByIDMsg:
+		a.handleGetSubredditByID(context, msg)
 
 	case *JoinSubredditMsg:
 		a.handleJoinSubreddit(context, msg)
@@ -99,8 +99,8 @@ func (a *SubredditActor) Receive(context actor.Context) {
 	case *GetSubredditMembersMsg:
 		a.handleGetMembers(context, msg)
 
-	case *GetSubredditDetailsMsg:
-		a.handleGetDetails(context, msg)
+	case *GetSubredditByNameMsg:
+		a.handleGetSubredditByName(context, msg)
 
 	case *GetCountsMsg:
 		context.Respond(len(a.subredditsByName))
@@ -157,12 +157,131 @@ func (a *SubredditActor) handleCreateSubreddit(ctx actor.Context, msg *CreateSub
 	ctx.Respond(newSubreddit)
 }
 
-func (a *SubredditActor) handleGetSubreddit(ctx actor.Context, msg *GetSubredditMsg) {
-	if subreddit, exists := a.subredditsByName[msg.Name]; exists {
-		ctx.Respond(subreddit)
-	} else {
-		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+func (a *SubredditActor) handleGetSubredditByID(ctx actor.Context, msg *GetSubredditByIDMsg) {
+	log.Printf("Fetching subreddit details for ID: %s", msg.SubredditID)
+
+	// First check cache
+	var subreddit *models.Subreddit
+	for _, s := range a.subredditsByName {
+		if s.ID == msg.SubredditID {
+			subreddit = s
+			break
+		}
 	}
+
+	// If not in cache, try MongoDB
+	if subreddit == nil {
+		dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+		defer cancel()
+
+		var err error
+		subreddit, err = a.mongodb.GetSubredditByID(dbCtx, msg.SubredditID)
+		if err != nil {
+			log.Printf("Error fetching subreddit from MongoDB: %v", err)
+			ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", err))
+			return
+		}
+
+		// Update cache if found
+		if subreddit != nil {
+			a.subredditsByName[subreddit.Name] = subreddit
+			a.subredditsById[subreddit.ID] = subreddit
+
+			if _, exists := a.subredditMembers[subreddit.ID]; !exists {
+				a.subredditMembers[subreddit.ID] = make(map[uuid.UUID]bool)
+			}
+		}
+	}
+
+	if subreddit == nil {
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		return
+	}
+
+	// Use actual member count from MongoDB
+	// _, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	// defer cancel()
+
+	response := struct {
+		ID          string      `json:"ID"`
+		Name        string      `json:"Name"`
+		Description string      `json:"Description"`
+		CreatorID   string      `json:"CreatorID"`
+		Members     int         `json:"Members"`
+		CreatedAt   time.Time   `json:"CreatedAt"`
+		Posts       []uuid.UUID `json:"Posts"`
+	}{
+		ID:          subreddit.ID.String(),
+		Name:        subreddit.Name,
+		Description: subreddit.Description,
+		CreatorID:   subreddit.CreatorID.String(),
+		Members:     subreddit.Members, // Use the value from the model
+		CreatedAt:   subreddit.CreatedAt,
+		Posts:       subreddit.Posts,
+	}
+
+	log.Printf("Successfully fetched subreddit details for ID: %s", msg.SubredditID)
+	ctx.Respond(response)
+}
+
+func (a *SubredditActor) handleGetSubredditByName(ctx actor.Context, msg *GetSubredditByNameMsg) {
+	log.Printf("Fetching subreddit details for name: %s", msg.Name)
+
+	// First check cache
+	var subreddit *models.Subreddit
+	if cached, exists := a.subredditsByName[msg.Name]; exists {
+		subreddit = cached
+	}
+
+	// If not in cache, try MongoDB
+	if subreddit == nil {
+		dbCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+		defer cancel()
+
+		var err error
+		subreddit, err = a.mongodb.GetSubredditByName(dbCtx, msg.Name)
+		if err != nil {
+			log.Printf("Error fetching subreddit from MongoDB: %v", err)
+			ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", err))
+			return
+		}
+
+		if subreddit != nil {
+			// Update cache
+			a.subredditsByName[subreddit.Name] = subreddit
+			a.subredditsById[subreddit.ID] = subreddit
+
+			if _, exists := a.subredditMembers[subreddit.ID]; !exists {
+				a.subredditMembers[subreddit.ID] = make(map[uuid.UUID]bool)
+			}
+		}
+	}
+
+	if subreddit == nil {
+		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
+		return
+	}
+
+	response := struct {
+		ID          string      `json:"ID"`
+		Name        string      `json:"Name"`
+		Description string      `json:"Description"`
+		CreatorID   string      `json:"CreatorID"`
+		Members     int         `json:"Members"`
+		CreatedAt   time.Time   `json:"CreatedAt"`
+		Posts       []uuid.UUID `json:"Posts"`
+	}{
+		ID:          subreddit.ID.String(),
+		Name:        subreddit.Name,
+		Description: subreddit.Description,
+		CreatorID:   subreddit.CreatorID.String(),
+		Members:     subreddit.Members, // Use the value from the model
+		CreatedAt:   subreddit.CreatedAt,
+		Posts:       subreddit.Posts,
+	}
+
+	log.Printf("Successfully fetched subreddit details for name: %s", msg.Name)
+	ctx.Respond(response)
 }
 
 func (a *SubredditActor) handleJoinSubreddit(ctx actor.Context, msg *JoinSubredditMsg) {
@@ -314,28 +433,4 @@ func (a *SubredditActor) handleGetMembers(ctx actor.Context, msg *GetSubredditMe
 
 	log.Printf("Found %d members for subreddit: %s", len(memberIDs), msg.SubredditID)
 	ctx.Respond(memberIDs)
-}
-
-func (a *SubredditActor) handleGetDetails(ctx actor.Context, msg *GetSubredditDetailsMsg) {
-	var subreddit *models.Subreddit
-	for _, s := range a.subredditsByName {
-		if s.ID == msg.SubredditID {
-			subreddit = s
-			break
-		}
-	}
-
-	if subreddit == nil {
-		ctx.Respond(utils.NewAppError(utils.ErrNotFound, "subreddit not found", nil))
-		return
-	}
-
-	details := struct {
-		Subreddit   *models.Subreddit
-		MemberCount int
-	}{
-		Subreddit:   subreddit,
-		MemberCount: len(a.subredditMembers[msg.SubredditID]),
-	}
-	ctx.Respond(details)
 }

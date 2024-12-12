@@ -104,6 +104,14 @@ func (m *MongoDB) GetSubredditByName(ctx context.Context, name string) (*models.
 	if err != nil {
 		return nil, fmt.Errorf("invalid creator ID in database: %v", err)
 	}
+	posts := make([]uuid.UUID, 0, len(subredditDB.Posts))
+	for _, postIDStr := range subredditDB.Posts {
+		postID, err := uuid.Parse(postIDStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid post ID in database: %v", err)
+		}
+		posts = append(posts, postID)
+	}
 
 	return &models.Subreddit{
 		ID:          id,
@@ -112,6 +120,7 @@ func (m *MongoDB) GetSubredditByName(ctx context.Context, name string) (*models.
 		CreatorID:   creatorID,
 		Members:     subredditDB.Members,
 		CreatedAt:   subredditDB.CreatedAt,
+		Posts:       posts,
 	}, nil
 }
 

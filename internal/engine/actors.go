@@ -277,8 +277,8 @@ func isSubredditMessage(msg interface{}) bool {
 		*actors.LeaveSubredditMsg,
 		*actors.ListSubredditsMsg,
 		*actors.GetSubredditMembersMsg,
-		*actors.GetSubredditDetailsMsg,
-		*actors.GetSubredditMsg,
+		*actors.GetSubredditByIDMsg,
+		*actors.GetSubredditByNameMsg,
 		*actors.GetCountsMsg:
 		return true
 	default:
