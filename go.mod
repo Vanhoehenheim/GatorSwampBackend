@@ -18,6 +18,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
+	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.13.6 // indirect
 	github.com/lithammer/shortuuid/v4 v4.0.0 // indirect
 	github.com/lmittmann/tint v1.0.3 // indirect

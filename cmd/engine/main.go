@@ -14,7 +14,8 @@ import (
 	"log"                        // Logging
 	"net/http"                   // HTTP server
 	"strconv"                    // String conversion utilities
-	"time"                       // Time utilities
+	"strings"
+	"time" // Time utilities
 
 	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
 	"github.com/google/uuid"                  // UUID generation for unique identifiers
@@ -116,9 +117,14 @@ type SendMessageRequest struct {
 }
 
 func main() {
-	// Initialize MongoDB
-	mongoURI := "mongodb+srv://panangadanprajay:golangReddit123!@cluster0.wpgh3.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-	mongodb, err := database.NewMongoDB(mongoURI)
+	// Load configuration
+	config, err := config.LoadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// Initialize MongoDB with configuration
+	mongodb, err := database.NewMongoDB(config.MongoDBURI)
 	if err != nil {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
@@ -127,13 +133,15 @@ func main() {
 			log.Printf("Error closing MongoDB connection: %v", err)
 		}
 	}()
+
 	if err := mongodb.FixCommentSubreddits(context.Background()); err != nil {
 		log.Printf("Error fixing comment subreddits: %v", err)
 	}
-	cfg := config.DefaultConfig()
+
+	// Initialize services using the configuration from config.Server
 	metrics := utils.NewMetricsCollector()
 	system := actor.NewActorSystem()
-	// Pass mongodb to engine
+
 	gatorEngine := engine.NewEngine(system, metrics, mongodb)
 	engineProps := actor.PropsFromProducer(func() actor.Actor {
 		return gatorEngine
@@ -146,8 +154,9 @@ func main() {
 		engine:    gatorEngine,
 		enginePID: enginePID,
 		metrics:   metrics,
-		mongodb:   mongodb, // Add MongoDB to server struct
+		mongodb:   mongodb,
 	}
+
 	// Initialize actors with MongoDB
 	server.commentActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
 		return actors.NewCommentActor(enginePID, mongodb)
@@ -157,6 +166,7 @@ func main() {
 	server.directMessageActor = system.Root.Spawn(actor.PropsFromProducer(func() actor.Actor {
 		return actors.NewDirectMessageActor(mongodb)
 	}))
+
 	// Set up HTTP endpoints
 	http.HandleFunc("/health", corsMiddleware(server.handleHealth()))
 	http.HandleFunc("/subreddit", corsMiddleware(server.handleSubreddits()))
@@ -176,7 +186,8 @@ func main() {
 	http.HandleFunc("/posts/recent", corsMiddleware(server.handleRecentPosts()))
 	http.HandleFunc("/users", corsMiddleware(server.handleGetAllUsers()))
 
-	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	// Use the server configuration from the loaded config
+	serverAddr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	log.Printf("Starting server on %s", serverAddr)
 	if err := http.ListenAndServe(serverAddr, nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
@@ -185,7 +196,16 @@ func main() {
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*") // For development
+		// Load config each time to get the latest values
+		config, err := config.LoadConfig()
+		if err != nil {
+			// Fallback to allow all origins if config can't be loaded
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else {
+			// Use the configured allowed origins
+			w.Header().Set("Access-Control-Allow-Origin", strings.Join(config.AllowedOrigins, ", "))
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
