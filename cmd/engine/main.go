@@ -18,6 +18,7 @@ import (
 
 	"github.com/asynkron/protoactor-go/actor" // ProtoActor for actor-based concurrency
 	"github.com/google/uuid"                  // UUID generation for unique identifiers
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // Request structs for handling JSON input
@@ -173,6 +174,7 @@ func main() {
 	http.HandleFunc("/messages/read", corsMiddleware(server.handleMarkMessageRead()))
 	http.HandleFunc("/comment/vote", corsMiddleware(server.handleCommentVote()))
 	http.HandleFunc("/posts/recent", corsMiddleware(server.handleRecentPosts()))
+	http.HandleFunc("/users", corsMiddleware(server.handleGetAllUsers()))
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("Starting server on %s", serverAddr)
@@ -1385,5 +1387,53 @@ func (s *Server) handleRecentPosts() http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
+	}
+}
+
+func (s *Server) handleGetAllUsers() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := context.Background()
+		cursor, err := s.mongodb.Users.Find(ctx, bson.M{})
+		if err != nil {
+			http.Error(w, "Failed to fetch users", http.StatusInternalServerError)
+			return
+		}
+		defer cursor.Close(ctx)
+
+		var users []struct {
+			ID       string    `json:"id"`
+			Username string    `json:"username"`
+			Email    string    `json:"email"`
+			Karma    int       `json:"karma"`
+			JoinedAt time.Time `json:"joinedAt"`
+		}
+
+		for cursor.Next(ctx) {
+			var user database.UserDocument
+			if err := cursor.Decode(&user); err != nil {
+				continue
+			}
+			users = append(users, struct {
+				ID       string    `json:"id"`
+				Username string    `json:"username"`
+				Email    string    `json:"email"`
+				Karma    int       `json:"karma"`
+				JoinedAt time.Time `json:"joinedAt"`
+			}{
+				ID:       user.ID,
+				Username: user.Username,
+				Email:    user.Email,
+				Karma:    user.Karma,
+				JoinedAt: user.CreatedAt,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(users)
 	}
 }
