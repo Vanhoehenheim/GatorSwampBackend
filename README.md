@@ -1,6 +1,3 @@
-
-Link To Frontend: https://github.com/Vanhoehenheim/Gator_Swamp_Frontend
-
 # Gator-Swamp: A Social Media application for Gators built with Go using Actor Models
 
 Link To Frontend: https://github.com/Vanhoehenheim/Gator_Swamp_Frontend
