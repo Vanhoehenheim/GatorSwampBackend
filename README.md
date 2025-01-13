@@ -1,260 +1,130 @@
-# Complete API Testing Guide for Gator-Swamp
 
-## Pre-existing Test Users
-```
-User 1 (Alice): "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd"
-User 2 (Bob): "ddf5e4af-2d12-4715-96fa-d1e48610a506"
-```
+Link To Frontend: https://github.com/Vanhoehenheim/Gator_Swamp_Frontend
 
-## 1. User Management
+# Gator-Swamp: A Social Media application for Gators built with Go using Actor Models
 
-### 1.1 User Registration
-```json
-POST http://localhost:8080/user/register
-{
-    "username": "testuser",
-    "email": "test@example.com",
-    "password": "password123",
-    "karma": 100
-}
-```
+Link To Frontend: https://github.com/Vanhoehenheim/Gator_Swamp_Frontend
 
-### 1.2 User Login
-```json
-POST http://localhost:8080/user/login
-{
-    "email": "test@example.com",
-    "password": "password123"
-}
-```
+## Overview
+Gator-Swamp is a Reddit-like platform built using Go, implementing the Actor Model pattern with Proto.Actor for concurrent operations. The system uses MongoDB for persistence and provides a RESTful API interface for client applications.
 
-### 1.3 Get User Profile
-```
-GET http://localhost:8080/user/profile?userId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd
-```
+## Features
+- User Management
+  - Registration and authentication
+  - Karma system
+  - User profiles with activity tracking
+  - Direct messaging between users
 
-## 2. Subreddit Operations
+- Content Management
+  - Subreddit creation and management
+  - Post creation and management
+  - Nested comments with threading
+  - Voting system for posts and comments
 
-### 2.1 Create Subreddit
-```json
-POST http://localhost:8080/subreddit
-{
-    "name": "testsubreddit",
-    "description": "A test subreddit for API testing",
-    "creatorId": "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd"
-}
-```
+- Real-time Features
+  - User activity tracking
+  - Message read status
+  - Karma updates
 
-### 2.2 List All Subreddits
-```
-GET http://localhost:8080/subreddit
-```
+## Tech Stack
+- **Language**: Go
+- **Actor Framework**: Proto.Actor
+- **Database**: MongoDB
+- **Authentication**: Custom token-based system
+- **API**: RESTful HTTP endpoints
 
-### 2.3 Get Subreddit Members
-```
-GET http://localhost:8080/subreddit/members?id=23eadaec-66fd-4e6b-a2cb-02a97fd25c3f
-```
+## Architecture
 
-### 2.4 Join Subreddit
-```json
-POST http://localhost:8080/subreddit/members
-{
-    "subredditId": "23eadaec-66fd-4e6b-a2cb-02a97fd25c3f",
-    "userId": "ddf5e4af-2d12-4715-96fa-d1e48610a506"
-}
-```
+### Actor System
+The application uses the Actor Model for handling concurrent operations, with several key actors:
+- **Engine**: Central coordinator for all operations
+- **UserSupervisor**: Manages user-related operations and user actors
+- **SubredditActor**: Handles subreddit operations
+- **PostActor**: Manages post-related operations
+- **CommentActor**: Handles comment operations
+- **DirectMessageActor**: Manages private messaging
 
-### 2.5 Leave Subreddit
-```json
-DELETE http://localhost:8080/subreddit/members
-{
-    "subredditId": "23eadaec-66fd-4e6b-a2cb-02a97fd25c3f",
-    "userId": "ddf5e4af-2d12-4715-96fa-d1e48610a506"
-}
-```
+### Database Schema
+The system uses MongoDB with the following collections:
+- Users
+- Subreddits
+- Posts
+- Comments
+- Messages
+- Votes
 
-## 3. Post Operations
+## API Endpoints
 
-### 3.1 Create Post
-```json
-POST http://localhost:8080/post
-{
-    "title": "Test Post Title",
-    "content": "This is test post content",
-    "authorId": "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd",
-    "subredditId": "23eadaec-66fd-4e6b-a2cb-02a97fd25c3f"
-}
-```
+### User Management
+- `POST /user/register`: Register new user
+- `POST /user/login`: User login
+- `GET /user/profile`: Get user profile
+- `GET /user/feed`: Get user's personalized feed
 
-### 3.2 Get Post by ID
-```
-GET http://localhost:8080/post?id=34894994-2524-4080-b52f-b1275fe67965
-```
+### Subreddits
+- `POST /subreddit`: Create new subreddit
+- `GET /subreddit`: List subreddits
+- `GET /subreddit/members`: Get subreddit members
+- `POST /subreddit/members`: Join subreddit
+- `DELETE /subreddit/members`: Leave subreddit
 
-### 3.3 Get Posts by Subreddit
-```
-GET http://localhost:8080/post?subredditId=23eadaec-66fd-4e6b-a2cb-02a97fd25c3f
-```
+### Posts
+- `POST /post`: Create new post
+- `GET /post`: Get post by ID
+- `POST /post/vote`: Vote on post
+- `GET /posts/recent`: Get recent posts
 
-### 3.4 Vote on Post
-```json
-POST http://localhost:8080/post/vote
-{
-    "postId": "34894994-2524-4080-b52f-b1275fe67965",
-    "userId": "ddf5e4af-2d12-4715-96fa-d1e48610a506",
-    "isUpvote": true
-}
+### Comments
+- `POST /comment`: Create comment
+- `PUT /comment`: Edit comment
+- `DELETE /comment`: Delete comment
+- `GET /comment`: Get comment by ID
+- `GET /comment/post`: Get comments for post
+- `POST /comment/vote`: Vote on comment
+
+### Messages
+- `POST /messages`: Send direct message
+- `GET /messages`: Get user messages
+- `GET /messages/conversation`: Get conversation between users
+- `POST /messages/read`: Mark message as read
+- `DELETE /messages`: Delete message
+
+## Setup and Configuration
+
+### Prerequisites
+- Go 1.x
+- MongoDB
+- Protocol Buffers
+
+### Environment Variables
+Configure the following environment variables:
+```
+MONGODB_URI=mongodb+srv://your-connection-string
+PORT=8080
+HOST=localhost
 ```
 
-### 3.5 Get User Feed
-```
-GET http://localhost:8080/user/feed?userId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd&limit=10
-```
+### Running the Application
+1. Clone the repository
+2. Install dependencies: `go mod download`
+3. Start the server: `go run main.go`
 
-## 4. Comment Operations
-
-### 4.1 Create Top-level Comment
-```json
-POST http://localhost:8080/comment
-{
-    "content": "This is a top-level comment",
-    "authorId": "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd",
-    "postId": "34894994-2524-4080-b52f-b1275fe67965",
-    "subredditId": "23eadaec-66fd-4e6b-a2cb-02a97fd25c3f"
-}
+### Running Tests
+Execute the test suite:
+```bash
+go test ./...
 ```
 
-### 4.2 Create Reply Comment
-```json
-POST http://localhost:8080/comment
-{
-    "content": "This is a reply to another comment",
-    "authorId": "ddf5e4af-2d12-4715-96fa-d1e48610a506",
-    "postId": "34894994-2524-4080-b52f-b1275fe67965",
-    "subredditId": "23eadaec-66fd-4e6b-a2cb-02a97fd25c3f",
-    "parentId": "b2993f49-125e-480e-87e3-bbe5a3ab5f73"
-}
-```
+## Performance and Scaling
+The application includes several performance-oriented features:
+- In-memory caching in actors
+- MongoDB indexing for frequent queries
+- Metrics collection for monitoring
+- Connection pooling for database operations
 
-### 4.3 Edit Comment
-```json
-PUT http://localhost:8080/comment
-{
-    "commentId": "b2993f49-125e-480e-87e3-bbe5a3ab5f73",
-    "authorId": "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd",
-    "content": "This is an edited comment"
-}
-```
-
-### 4.4 Vote on Comment
-```json
-POST http://localhost:8080/comment/vote
-{
-    "commentId": "b2993f49-125e-480e-87e3-bbe5a3ab5f73",
-    "userId": "ddf5e4af-2d12-4715-96fa-d1e48610a506",
-    "isUpvote": true
-}
-```
-
-### 4.5 Get Comments for Post
-```
-GET http://localhost:8080/comment/post?postId=34894994-2524-4080-b52f-b1275fe67965
-```
-
-### 4.6 Delete Comment
-```
-DELETE http://localhost:8080/comment?commentId=b2993f49-125e-480e-87e3-bbe5a3ab5f73&authorId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd
-```
-
-## 5. Direct Message Operations
-
-### 5.1 Send Message
-```json
-POST http://localhost:8080/messages
-{
-    "fromId": "dbc3f210-8416-4fab-b3cb-1e6ac1589cdd",
-    "toId": "ddf5e4af-2d12-4715-96fa-d1e48610a506",
-    "content": "Hello! This is a test message."
-}
-```
-
-### 5.2 Get User's Messages
-```
-GET http://localhost:8080/messages?userId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd
-```
-
-### 5.3 Get Conversation Between Users
-```
-GET http://localhost:8080/messages/conversation?user1=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd&user2=ddf5e4af-2d12-4715-96fa-d1e48610a506
-```
-
-### 5.4 Mark Message as Read
-```json
-POST http://localhost:8080/messages/read
-{
-    "messageId": "MESSAGE_ID_FROM_PREVIOUS_RESPONSE",
-    "userId": "ddf5e4af-2d12-4715-96fa-d1e48610a506"
-}
-```
-
-### 5.5 Delete Message
-```
-DELETE http://localhost:8080/messages?messageId=MESSAGE_ID_HERE&userId=dbc3f210-8416-4fab-b3cb-1e6ac1589cdd
-```
-
-## 6. Health Check
-```
-GET http://localhost:8080/health
-```
-
-## Testing Scenarios
-
-### User Flow
-1. Register new user
-2. Login with user
-3. Get user profile
-4. Create a subreddit
-5. Join another subreddit
-6. Create posts
-7. Vote on posts
-8. Check user feed
-
-### Subreddit Flow
-1. Create subreddit
-2. List all subreddits
-3. Get members
-4. Have users join
-5. Have users leave
-6. Check member count updates
-
-### Post Flow
-1. Create post in subreddit
-2. Get post by ID
-3. Get all posts in subreddit
-4. Vote on post
-5. Check karma updates
-6. Check user feed updates
-
-### Comment Flow
-1. Create top-level comment
-2. Create reply to comment
-3. Create nested reply
-4. Edit a comment
-5. Vote on comments
-6. Delete a comment
-7. Check nested comment structure
-
-### Message Flow
-1. Send message between users
-2. Get user's messages
-3. View conversation
-4. Mark as read
-5. Delete message
-6. Verify message states
-
-### Error Cases
-1. Try to create duplicate subreddit
-2. Try to vote twice on same post
-3. Try to edit another user's comment
-4. Try to access unauthorized content
-5. Try to send message to non-existent user
+## Security Features
+- Password hashing using bcrypt
+- Token-based authentication
+- Input validation and sanitization
+- Rate limiting capabilities
+- Permission-based access control
