@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -92,7 +93,7 @@ func LoadConfig() (*Config, error) {
 
 	// Override remaining settings from environment if provided
 	if origins := os.Getenv("ALLOWED_ORIGINS"); origins != "" {
-		config.AllowedOrigins = []string{origins}
+		config.AllowedOrigins = strings.Split(origins, ",")
 	}
 
 	if debug := os.Getenv("DEBUG"); debug == "true" {

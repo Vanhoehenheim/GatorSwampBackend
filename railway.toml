@@ -1,0 +1,12 @@
+[build]
+builder = "go"
+buildCommand = "go build -o main ./cmd/engine"
+
+[deploy]
+startCommand = "./main"
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+
+[database]
+type = "mongodb"
