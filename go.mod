@@ -9,6 +9,8 @@ require (
 	golang.org/x/crypto v0.26.0
 )
 
+require github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
+
 require (
 	github.com/Workiva/go-datastructures v1.1.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

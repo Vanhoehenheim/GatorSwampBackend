@@ -1,4 +1,3 @@
-// internal/database/comment_repository.go
 package database
 
 import (

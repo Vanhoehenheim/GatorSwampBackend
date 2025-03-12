@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/joho/godotenv"
@@ -35,13 +36,26 @@ func DefaultConfig() *ServerConfig {
 
 // LoadConfig loads configuration from environment variables and applies defaults
 func LoadConfig() (*Config, error) {
-	// Load .env file if it exists
-	err := godotenv.Load()
-	if err != nil {
-		// Don't return error if .env doesn't exist
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("error loading .env file: %v", err)
+	// Try to load .env file from multiple possible locations
+	envLocations := []string{
+		".env",          // Current directory
+		"../../.env",    // Project root when running from cmd/engine
+		"../../../.env", // Even higher directory
+		filepath.Join(os.Getenv("GOPATH"), "src/gator-swamp/.env"), // GOPATH location
+	}
+
+	envLoaded := false
+	for _, location := range envLocations {
+		if err := godotenv.Load(location); err == nil {
+			envLoaded = true
+			break
 		}
+	}
+
+	if !envLoaded {
+		// If we couldn't find a .env file, try loading without a path
+		// This is a silent failure if no .env exists, which is fine
+		_ = godotenv.Load()
 	}
 
 	// Start with default server config
