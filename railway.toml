@@ -1,5 +1,5 @@
 [build]
-builder = "go"
+builder = "NIXPACKS"
 buildCommand = "go build -o main ./cmd/engine"
 goVersion = "1.23.3" # Specify your Go version here
 
