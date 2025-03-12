@@ -1,13 +1,10 @@
 [build]
-builder = "NIXPACKS"
 buildCommand = "go build -o main ./cmd/engine"
-goVersion = "1.23.3" # Specify your Go version here
 
 [deploy]
 startCommand = "./main"
 healthcheckPath = "/health"
 healthcheckTimeout = 100
-restartPolicyType = "on_failure"
 
-[database]
-type = "mongodb"
+[env]
+HOST = "0.0.0.0"  # Force the host to be 0.0.0.0

@@ -30,7 +30,7 @@ type Config struct {
 func DefaultConfig() *ServerConfig {
 	return &ServerConfig{
 		Port:           8080,
-		Host:           "localhost",
+		Host:           "0.0.0.0", // Change from "localhost" to "0.0.0.0"
 		MetricsEnabled: true,
 	}
 }

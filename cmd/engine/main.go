@@ -100,7 +100,9 @@ func main() {
 	}
 
 	// Public endpoints (no JWT required)
-	mux.HandleFunc("/health", middleware.ApplyCORS(server.HandleHealth(), corsConfig))
+	// Then update your router to include both endpoints
+	mux.HandleFunc("/health", middleware.ApplyCORS(server.HandleSimpleHealth(), corsConfig))
+	mux.HandleFunc("/health/full", middleware.ApplyCORS(server.HandleHealth(), corsConfig))
 	mux.HandleFunc("/user/register", middleware.ApplyCORS(server.HandleUserRegistration(), corsConfig))
 	mux.HandleFunc("/user/login", middleware.ApplyCORS(server.HandleUserLogin(), corsConfig))
 
