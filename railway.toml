@@ -1,6 +1,7 @@
 [build]
 builder = "go"
 buildCommand = "go build -o main ./cmd/engine"
+goVersion = "1.23.3" # Specify your Go version here
 
 [deploy]
 startCommand = "./main"
