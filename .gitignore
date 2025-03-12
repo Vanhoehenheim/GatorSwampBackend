@@ -1,3 +1,26 @@
+# Environment files
 .env
-*.env
-.env.*
+.env.production
+.env.local
+
+# Build files
+dist/
+build/
+*.build/
+out/
+
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Runtime files
+*.log
+logs/
+temp/
+.cache/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
