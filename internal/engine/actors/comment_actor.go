@@ -124,6 +124,7 @@ func (a *CommentActor) handleLoadComments(context actor.Context) {
 		id, _ := uuid.Parse(doc.ID)
 		authorID, _ := uuid.Parse(doc.AuthorID)
 		postID, _ := uuid.Parse(doc.PostID)
+		subredditID, _ := uuid.Parse(doc.SubredditID)
 
 		// Parse parent ID if it exists
 		var parentID *uuid.UUID
@@ -142,18 +143,20 @@ func (a *CommentActor) handleLoadComments(context actor.Context) {
 
 		// Create the comment
 		comment := &models.Comment{
-			ID:        id,
-			Content:   doc.Content,
-			AuthorID:  authorID,
-			PostID:    postID,
-			ParentID:  parentID,
-			Children:  children,
-			CreatedAt: doc.CreatedAt,
-			UpdatedAt: doc.UpdatedAt,
-			IsDeleted: doc.IsDeleted,
-			Upvotes:   doc.Upvotes,
-			Downvotes: doc.Downvotes,
-			Karma:     doc.Karma,
+			ID:             id,
+			Content:        doc.Content,
+			AuthorID:       authorID,
+			AuthorUsername: doc.AuthorUsername,
+			PostID:         postID,
+			SubredditID:    subredditID,
+			ParentID:       parentID,
+			Children:       children,
+			CreatedAt:      doc.CreatedAt,
+			UpdatedAt:      doc.UpdatedAt,
+			IsDeleted:      doc.IsDeleted,
+			Upvotes:        doc.Upvotes,
+			Downvotes:      doc.Downvotes,
+			Karma:          doc.Karma,
 		}
 
 		// Update local caches
@@ -177,24 +180,33 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		return
 	}
 
+	// Fetch the user to get their username
+	user, err := a.mongodb.GetUser(ctx, msg.AuthorID)
+	if err != nil {
+		log.Printf("Error fetching user: %v", err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch author details", err))
+		return
+	}
+
 	now := time.Now()
 	commentID := uuid.New()
 	log.Printf("Generated new comment ID: %s", commentID)
 
 	newComment := &models.Comment{
-		ID:          commentID,
-		Content:     msg.Content,
-		AuthorID:    msg.AuthorID,
-		PostID:      msg.PostID,
-		SubredditID: post.SubredditID,
-		ParentID:    msg.ParentID,
-		Children:    make([]uuid.UUID, 0),
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		IsDeleted:   false,
-		Upvotes:     0,
-		Downvotes:   0,
-		Karma:       0,
+		ID:             commentID,
+		Content:        msg.Content,
+		AuthorID:       msg.AuthorID,
+		AuthorUsername: user.Username,
+		PostID:         msg.PostID,
+		SubredditID:    post.SubredditID,
+		ParentID:       msg.ParentID,
+		Children:       make([]uuid.UUID, 0),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		IsDeleted:      false,
+		Upvotes:        0,
+		Downvotes:      0,
+		Karma:          0,
 	}
 	if msg.ParentID != nil {
 		log.Printf("This is a reply to comment ID: %s", msg.ParentID.String())
@@ -239,32 +251,34 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 
 	// Create response
 	response := struct {
-		ID          string    `json:"id"`
-		Content     string    `json:"content"`
-		AuthorID    string    `json:"authorId"`
-		PostID      string    `json:"postId"`
-		SubredditID string    `json:"subredditId"`
-		ParentID    *string   `json:"parentId,omitempty"`
-		Children    []string  `json:"children"`
-		CreatedAt   time.Time `json:"createdAt"`
-		UpdatedAt   time.Time `json:"updatedAt"`
-		IsDeleted   bool      `json:"isDeleted"`
-		Upvotes     int       `json:"upvotes"`
-		Downvotes   int       `json:"downvotes"`
-		Karma       int       `json:"karma"`
+		ID             string    `json:"id"`
+		Content        string    `json:"content"`
+		AuthorID       string    `json:"authorId"`
+		AuthorUsername string    `json:"authorUsername"`
+		PostID         string    `json:"postId"`
+		SubredditID    string    `json:"subredditId"`
+		ParentID       *string   `json:"parentId,omitempty"`
+		Children       []string  `json:"children"`
+		CreatedAt      time.Time `json:"createdAt"`
+		UpdatedAt      time.Time `json:"updatedAt"`
+		IsDeleted      bool      `json:"isDeleted"`
+		Upvotes        int       `json:"upvotes"`
+		Downvotes      int       `json:"downvotes"`
+		Karma          int       `json:"karma"`
 	}{
-		ID:          newComment.ID.String(),
-		Content:     newComment.Content,
-		AuthorID:    newComment.AuthorID.String(),
-		PostID:      newComment.PostID.String(),
-		SubredditID: newComment.SubredditID.String(),
-		Children:    make([]string, 0),
-		CreatedAt:   newComment.CreatedAt,
-		UpdatedAt:   newComment.UpdatedAt,
-		IsDeleted:   newComment.IsDeleted,
-		Upvotes:     newComment.Upvotes,
-		Downvotes:   newComment.Downvotes,
-		Karma:       newComment.Karma,
+		ID:             newComment.ID.String(),
+		Content:        newComment.Content,
+		AuthorID:       newComment.AuthorID.String(),
+		AuthorUsername: newComment.AuthorUsername,
+		PostID:         newComment.PostID.String(),
+		SubredditID:    newComment.SubredditID.String(),
+		Children:       make([]string, 0),
+		CreatedAt:      newComment.CreatedAt,
+		UpdatedAt:      newComment.UpdatedAt,
+		IsDeleted:      newComment.IsDeleted,
+		Upvotes:        newComment.Upvotes,
+		Downvotes:      newComment.Downvotes,
+		Karma:          newComment.Karma,
 	}
 
 	if newComment.ParentID != nil {

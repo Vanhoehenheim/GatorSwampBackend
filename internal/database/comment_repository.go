@@ -16,19 +16,20 @@ import (
 
 // CommentDocument represents comment data in MongoDB
 type CommentDocument struct {
-	ID          string    `bson:"_id"`
-	Content     string    `bson:"content"`
-	AuthorID    string    `bson:"authorId"`
-	PostID      string    `bson:"postId"`
-	SubredditID string    `bson:"subredditId"`
-	ParentID    *string   `bson:"parentId,omitempty"`
-	Children    []string  `bson:"children"`
-	CreatedAt   time.Time `bson:"createdAt"`
-	UpdatedAt   time.Time `bson:"updatedAt"`
-	IsDeleted   bool      `bson:"isDeleted"`
-	Upvotes     int       `bson:"upvotes"`
-	Downvotes   int       `bson:"downvotes"`
-	Karma       int       `bson:"karma"`
+	ID             string    `bson:"_id"`
+	Content        string    `bson:"content"`
+	AuthorID       string    `bson:"authorId"`
+	AuthorUsername string    `bson:"authorUsername"` // Added AuthorUsername field
+	PostID         string    `bson:"postId"`
+	SubredditID    string    `bson:"subredditId"`
+	ParentID       *string   `bson:"parentId,omitempty"`
+	Children       []string  `bson:"children"`
+	CreatedAt      time.Time `bson:"createdAt"`
+	UpdatedAt      time.Time `bson:"updatedAt"`
+	IsDeleted      bool      `bson:"isDeleted"`
+	Upvotes        int       `bson:"upvotes"`
+	Downvotes      int       `bson:"downvotes"`
+	Karma          int       `bson:"karma"`
 }
 
 type VoteDocument struct {
@@ -45,18 +46,19 @@ func (m *MongoDB) SaveComment(ctx context.Context, comment *models.Comment) erro
 	log.Printf("Saving comment with ID: %s", comment.ID.String())
 
 	doc := CommentDocument{
-		ID:          comment.ID.String(),
-		Content:     comment.Content,
-		AuthorID:    comment.AuthorID.String(),
-		PostID:      comment.PostID.String(),
-		Children:    make([]string, len(comment.Children)),
-		CreatedAt:   comment.CreatedAt,
-		UpdatedAt:   comment.UpdatedAt,
-		IsDeleted:   comment.IsDeleted,
-		Upvotes:     comment.Upvotes,
-		Downvotes:   comment.Downvotes,
-		Karma:       comment.Karma,
-		SubredditID: comment.SubredditID.String(),
+		ID:             comment.ID.String(),
+		Content:        comment.Content,
+		AuthorID:       comment.AuthorID.String(),
+		AuthorUsername: comment.AuthorUsername,
+		PostID:         comment.PostID.String(),
+		Children:       make([]string, len(comment.Children)),
+		CreatedAt:      comment.CreatedAt,
+		UpdatedAt:      comment.UpdatedAt,
+		IsDeleted:      comment.IsDeleted,
+		Upvotes:        comment.Upvotes,
+		Downvotes:      comment.Downvotes,
+		Karma:          comment.Karma,
+		SubredditID:    comment.SubredditID.String(),
 	}
 
 	// Convert Children UUIDs to strings
@@ -197,19 +199,20 @@ func convertCommentDocumentToModel(doc *CommentDocument) (*models.Comment, error
 	}
 
 	return &models.Comment{
-		ID:          id,
-		Content:     doc.Content,
-		AuthorID:    authorID,
-		PostID:      postID,
-		SubredditID: subredditID,
-		ParentID:    parentID,
-		Children:    children,
-		CreatedAt:   doc.CreatedAt,
-		UpdatedAt:   doc.UpdatedAt,
-		IsDeleted:   doc.IsDeleted,
-		Upvotes:     doc.Upvotes,
-		Downvotes:   doc.Downvotes,
-		Karma:       doc.Karma,
+		ID:             id,
+		Content:        doc.Content,
+		AuthorID:       authorID,
+		AuthorUsername: doc.AuthorUsername,
+		PostID:         postID,
+		SubredditID:    subredditID,
+		ParentID:       parentID,
+		Children:       children,
+		CreatedAt:      doc.CreatedAt,
+		UpdatedAt:      doc.UpdatedAt,
+		IsDeleted:      doc.IsDeleted,
+		Upvotes:        doc.Upvotes,
+		Downvotes:      doc.Downvotes,
+		Karma:          doc.Karma,
 	}, nil
 }
 
