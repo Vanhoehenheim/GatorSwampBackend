@@ -17,17 +17,19 @@ import (
 
 // PostDocument represents the MongoDB schema for a post.
 type PostDocument struct {
-	ID             string    `bson:"_id"`
-	Title          string    `bson:"title"`
-	Content        string    `bson:"content"`
-	AuthorID       string    `bson:"authorid"`
-	AuthorUsername string    `bson:"authorusername"`
-	SubredditID    string    `bson:"subredditid"`
-	SubredditName  string    `bson:"subredditname"`
-	CreatedAt      time.Time `bson:"createdat"`
-	Upvotes        int       `bson:"upvotes"`
-	Downvotes      int       `bson:"downvotes"`
-	Karma          int       `bson:"karma"`
+	ID             string          `bson:"_id"`
+	Title          string          `bson:"title"`
+	Content        string          `bson:"content"`
+	AuthorID       string          `bson:"authorid"`
+	AuthorUsername string          `bson:"authorusername"`
+	SubredditID    string          `bson:"subredditid"`
+	SubredditName  string          `bson:"subredditname"`
+	CreatedAt      time.Time       `bson:"createdat"`
+	Upvotes        int             `bson:"upvotes"`
+	Downvotes      int             `bson:"downvotes"`
+	Karma          int             `bson:"karma"`
+	UserVotes      map[string]bool `bson:"uservotes,omitempty"` // Map of userID to vote type
+	CommentCount   int             `bson:"commentcount"`        // Number of comments on the post
 }
 
 // ModelToDocument converts a Post model to a MongoDB document.
@@ -44,6 +46,8 @@ func (m *MongoDB) ModelToDocument(post *models.Post) *PostDocument {
 		Upvotes:        post.Upvotes,
 		Downvotes:      post.Downvotes,
 		Karma:          post.Karma,
+		UserVotes:      post.UserVotes,
+		CommentCount:   post.CommentCount,
 	}
 }
 
@@ -76,6 +80,8 @@ func (m *MongoDB) DocumentToModel(doc *PostDocument) (*models.Post, error) {
 		Upvotes:        doc.Upvotes,
 		Downvotes:      doc.Downvotes,
 		Karma:          doc.Karma,
+		UserVotes:      doc.UserVotes,
+		CommentCount:   doc.CommentCount,
 	}, nil
 }
 
@@ -149,6 +155,25 @@ func (m *MongoDB) UpdatePostVotes(ctx context.Context, postID uuid.UUID, upvoteD
 			"upvotes":   upvoteDelta,
 			"downvotes": downvoteDelta,
 			"karma":     upvoteDelta - downvoteDelta,
+		},
+	}
+
+	result, err := m.Posts.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return utils.NewAppError(utils.ErrNotFound, "Post not found", nil)
+	}
+	return nil
+}
+
+// UpdatePostCommentCount updates the comment count for a post
+func (m *MongoDB) UpdatePostCommentCount(ctx context.Context, postID uuid.UUID, commentCount int) error {
+	filter := bson.M{"_id": postID.String()}
+	update := bson.M{
+		"$set": bson.M{
+			"commentcount": commentCount,
 		},
 	}
 

@@ -16,9 +16,10 @@ import (
 type (
 	// Vote related messages
 	VotePostMsg struct {
-		PostID   uuid.UUID
-		UserID   uuid.UUID
-		IsUpvote bool
+		PostID     uuid.UUID
+		UserID     uuid.UUID
+		IsUpvote   bool
+		RemoveVote bool // New field to support vote toggling
 	}
 
 	// Feed related messages
@@ -38,6 +39,7 @@ type (
 type Engine struct {
 	subredditActor *actor.PID
 	postActor      *actor.PID
+	commentActor   *actor.PID
 	userSupervisor *actor.PID
 	context        *actor.RootContext
 	metrics        *utils.MetricsCollector
@@ -71,16 +73,24 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector, mongo
 		return actors.NewSubredditActor(metrics, e.mongodb)
 	})
 
-	postProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewPostActor(metrics, enginePID, e.mongodb)
+	// Create the CommentActor first
+	commentProps := actor.PropsFromProducer(func() actor.Actor {
+		return actors.NewCommentActor(enginePID, e.mongodb)
 	})
 
 	userSupervisorPID := context.Spawn(supervisorProps)
 	subredditPID := context.Spawn(subredditProps)
+	commentPID := context.Spawn(commentProps)
+
+	// Create PostActor and pass CommentActor PID to it
+	postProps := actor.PropsFromProducer(func() actor.Actor {
+		return actors.NewPostActor(metrics, enginePID, e.mongodb, commentPID)
+	})
 	postPID := context.Spawn(postProps)
 
 	e.userSupervisor = userSupervisorPID
 	e.subredditActor = subredditPID
+	e.commentActor = commentPID
 	e.postActor = postPID
 
 	return e
@@ -323,6 +333,10 @@ func (e *Engine) GetSubredditActor() *actor.PID {
 
 func (e *Engine) GetPostActor() *actor.PID {
 	return e.postActor
+}
+
+func (e *Engine) GetCommentActor() *actor.PID {
+	return e.commentActor
 }
 
 func (e *Engine) GetMongoDB() *database.MongoDB {

@@ -33,9 +33,10 @@ type (
 	}
 
 	VotePostMsg struct {
-		PostID   uuid.UUID
-		UserID   uuid.UUID
-		IsUpvote bool
+		PostID     uuid.UUID
+		UserID     uuid.UUID
+		IsUpvote   bool
+		RemoveVote bool // New field to support vote toggling
 	}
 
 	GetUserFeedMsg struct {
@@ -66,23 +67,25 @@ type (
 
 // PostActor handles post-related operations
 type PostActor struct {
-	postsByID      map[uuid.UUID]*models.Post             // Cache for posts by their ID
-	subredditPosts map[uuid.UUID][]uuid.UUID              // Mapping of subreddit IDs to their posts
-	postVotes      map[uuid.UUID]map[uuid.UUID]voteStatus // Tracking user votes for posts
-	metrics        *utils.MetricsCollector                // Metrics for performance tracking
-	enginePID      *actor.PID                             // Reference to the Engine actor
-	mongodb        *database.MongoDB                      // MongoDB client
+	postsByID       map[uuid.UUID]*models.Post             // Cache for posts by their ID
+	subredditPosts  map[uuid.UUID][]uuid.UUID              // Mapping of subreddit IDs to their posts
+	postVotes       map[uuid.UUID]map[uuid.UUID]voteStatus // Tracking user votes for posts
+	metrics         *utils.MetricsCollector                // Metrics for performance tracking
+	enginePID       *actor.PID                             // Reference to the Engine actor
+	mongodb         *database.MongoDB                      // MongoDB client
+	commentActorPID *actor.PID                             // Reference to the Comment actor
 }
 
 // NewPostActor creates a new PostActor instance
-func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID, mongodb *database.MongoDB) actor.Actor {
+func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID, mongodb *database.MongoDB, commentActorPID *actor.PID) actor.Actor {
 	return &PostActor{
-		postsByID:      make(map[uuid.UUID]*models.Post),
-		subredditPosts: make(map[uuid.UUID][]uuid.UUID),
-		postVotes:      make(map[uuid.UUID]map[uuid.UUID]voteStatus),
-		metrics:        metrics,
-		enginePID:      enginePID,
-		mongodb:        mongodb,
+		postsByID:       make(map[uuid.UUID]*models.Post),
+		subredditPosts:  make(map[uuid.UUID][]uuid.UUID),
+		postVotes:       make(map[uuid.UUID]map[uuid.UUID]voteStatus),
+		metrics:         metrics,
+		enginePID:       enginePID,
+		mongodb:         mongodb,
+		commentActorPID: commentActorPID,
 	}
 }
 
@@ -184,6 +187,7 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		Upvotes:        0,
 		Downvotes:      0,
 		Karma:          0,
+		UserVotes:      make(map[string]bool), // Initialize UserVotes map
 	}
 
 	postDoc := a.mongodb.ModelToDocument(newPost)
@@ -204,13 +208,25 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 // Handles retrieving a specific post by ID
 func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
 	if post, exists := a.postsByID[msg.PostID]; exists {
+		// Ensure UserVotes is initialized
+		if post.UserVotes == nil {
+			post.UserVotes = make(map[string]bool)
+		}
+
+		// Count comments for this post
+		commentCount, err := a.getCommentCount(msg.PostID)
+		if err != nil {
+			log.Printf("Error counting comments for post %s: %v", msg.PostID, err)
+		} else {
+			post.CommentCount = commentCount
+		}
+
 		context.Respond(post)
 		return
 	}
 
 	ctx := stdctx.Background()
-	var post models.Post
-	err := a.mongodb.Posts.FindOne(ctx, bson.M{"_id": msg.PostID}).Decode(&post)
+	post, err := a.mongodb.GetPost(ctx, msg.PostID)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			context.Respond(utils.NewAppError(utils.ErrNotFound, "Post not found", nil))
@@ -220,11 +236,24 @@ func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
 		return
 	}
 
-	a.postsByID[post.ID] = &post
+	// Ensure UserVotes is initialized
+	if post.UserVotes == nil {
+		post.UserVotes = make(map[string]bool)
+	}
+
+	// Count comments for this post
+	commentCount, err := a.getCommentCount(msg.PostID)
+	if err != nil {
+		log.Printf("Error counting comments for post %s: %v", msg.PostID, err)
+	} else {
+		post.CommentCount = commentCount
+	}
+
+	a.postsByID[post.ID] = post
 	a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
 	a.subredditPosts[post.SubredditID] = append(a.subredditPosts[post.SubredditID], post.ID)
 
-	context.Respond(&post)
+	context.Respond(post)
 }
 
 // Handles retrieving all posts for a subreddit
@@ -252,6 +281,14 @@ func (a *PostActor) handleGetSubredditPosts(context actor.Context, msg *GetSubre
 		if _, exists := a.postVotes[post.ID]; !exists {
 			a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
 		}
+
+		// Count comments for each post
+		commentCount, err := a.getCommentCount(post.ID)
+		if err != nil {
+			log.Printf("Error counting comments for post %s: %v", post.ID, err)
+		} else {
+			post.CommentCount = commentCount
+		}
 	}
 
 	log.Printf("Found %d posts for subreddit: %s", len(posts), msg.SubredditID)
@@ -278,41 +315,64 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 	upvoteDelta := 0
 	downvoteDelta := 0
 
+	// Handle the different voting scenarios
 	if hasVoted {
-		if previousVote.IsUpvote == msg.IsUpvote {
+		if msg.RemoveVote && previousVote.IsUpvote == msg.IsUpvote {
+			// Remove an existing vote if the user is clicking the same button again
+			if msg.IsUpvote {
+				upvoteDelta = -1
+				post.Upvotes--
+			} else {
+				downvoteDelta = -1
+				post.Downvotes--
+			}
+			// Delete the vote record
+			delete(a.postVotes[msg.PostID], msg.UserID)
+		} else if previousVote.IsUpvote == msg.IsUpvote {
+			// This is a duplicate vote without the RemoveVote flag - keep old behavior
 			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
 			return
-		}
-		if msg.IsUpvote {
-			upvoteDelta = 1
-			downvoteDelta = -1
-			post.Downvotes--
-			post.Upvotes++
 		} else {
-			upvoteDelta = -1
-			downvoteDelta = 1
-			post.Upvotes--
-			post.Downvotes++
+			// Changing from upvote to downvote or vice versa
+			if msg.IsUpvote {
+				upvoteDelta = 1
+				downvoteDelta = -1
+				post.Downvotes--
+				post.Upvotes++
+			} else {
+				upvoteDelta = -1
+				downvoteDelta = 1
+				post.Upvotes--
+				post.Downvotes++
+			}
+			// Update vote record
+			a.postVotes[msg.PostID][msg.UserID] = voteStatus{
+				IsUpvote: msg.IsUpvote,
+				VotedAt:  time.Now(),
+			}
 		}
 	} else {
+		// New vote
 		if msg.IsUpvote {
 			upvoteDelta = 1
 			post.Upvotes++
 		} else {
 			downvoteDelta = 1
 			post.Downvotes++
+		}
+		// Create new vote record (only if not removing a non-existent vote)
+		if !msg.RemoveVote {
+			a.postVotes[msg.PostID][msg.UserID] = voteStatus{
+				IsUpvote: msg.IsUpvote,
+				VotedAt:  time.Now(),
+			}
 		}
 	}
 
-	// Update vote status in memory
-	a.postVotes[msg.PostID][msg.UserID] = voteStatus{
-		IsUpvote: msg.IsUpvote,
-		VotedAt:  time.Now(),
-	}
+	// Update post karma
 	post.Karma = post.Upvotes - post.Downvotes
 
 	// Update MongoDB
-	// In handleVote function, replace the MongoDB update section with:
 	ctx := stdctx.Background()
 	err := a.mongodb.UpdatePostVotes(ctx, post.ID, upvoteDelta, downvoteDelta)
 	if err != nil {
@@ -321,16 +381,42 @@ func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 		return
 	}
 
-	// Update user karma
-	context.Send(a.enginePID, &UpdateKarmaMsg{
-		UserID: post.AuthorID,
-		Delta: func() int {
-			if msg.IsUpvote {
-				return 1
-			}
-			return -1
-		}(),
-	})
+	// Update user karma (only for non-toggle operations or when switching vote types)
+	// Skip karma update if we're just removing a vote
+	karmaChange := 0
+	if upvoteDelta == 1 {
+		karmaChange = 1
+	} else if downvoteDelta == 1 {
+		karmaChange = -1
+	}
+
+	if karmaChange != 0 {
+		context.Send(a.enginePID, &UpdateKarmaMsg{
+			UserID: post.AuthorID,
+			Delta:  karmaChange,
+		})
+	}
+
+	// Add UserVotes field to response to help frontend show correct state
+	if post.UserVotes == nil {
+		post.UserVotes = make(map[string]bool)
+	}
+
+	// Update the UserVotes for the current user
+	if hasVote, hasVoted := a.postVotes[msg.PostID][msg.UserID]; hasVoted {
+		post.UserVotes[msg.UserID.String()] = hasVote.IsUpvote
+	} else {
+		// Remove the user's vote if they toggled it off
+		delete(post.UserVotes, msg.UserID.String())
+	}
+
+	// Count comments for this post
+	commentCount, err := a.getCommentCount(msg.PostID)
+	if err != nil {
+		log.Printf("Error counting comments for post %s: %v", msg.PostID, err)
+	} else {
+		post.CommentCount = commentCount
+	}
 
 	a.metrics.AddOperationLatency("vote_post", time.Since(startTime))
 	context.Respond(post)
@@ -346,6 +432,16 @@ func (a *PostActor) handleGetUserFeed(context actor.Context, msg *GetUserFeedMsg
 	if err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to get feed posts", err))
 		return
+	}
+
+	// Add comment count to each post
+	for _, post := range feedPosts {
+		commentCount, err := a.getCommentCount(post.ID)
+		if err != nil {
+			log.Printf("Error counting comments for post %s: %v", post.ID, err)
+		} else {
+			post.CommentCount = commentCount
+		}
 	}
 
 	a.metrics.AddOperationLatency("get_feed", time.Since(startTime))
@@ -381,6 +477,15 @@ func (a *PostActor) handleGetRecentPosts(context actor.Context, msg *GetRecentPo
 			log.Printf("Error converting document to model: %v", err)
 			continue
 		}
+
+		// Count comments for each post
+		commentCount, err := a.getCommentCount(post.ID)
+		if err != nil {
+			log.Printf("Error counting comments for post %s: %v", post.ID, err)
+		} else {
+			post.CommentCount = commentCount
+		}
+
 		posts = append(posts, post)
 	}
 
@@ -390,4 +495,10 @@ func (a *PostActor) handleGetRecentPosts(context actor.Context, msg *GetRecentPo
 	}
 
 	context.Respond(posts)
+}
+
+// Helper function to get comment count for a post
+func (a *PostActor) getCommentCount(postID uuid.UUID) (int, error) {
+	ctx := stdctx.Background()
+	return a.mongodb.CountPostComments(ctx, postID)
 }

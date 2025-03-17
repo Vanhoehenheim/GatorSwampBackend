@@ -17,5 +17,7 @@ type Post struct {
 	CreatedAt      time.Time
 	Upvotes        int
 	Downvotes      int
-	Karma          int // Add Karma field to track post karma
+	Karma          int             // Add Karma field to track post karma
+	UserVotes      map[string]bool // Map of userID to vote type (true=upvote, false=downvote)
+	CommentCount   int             // Number of comments on this post
 }

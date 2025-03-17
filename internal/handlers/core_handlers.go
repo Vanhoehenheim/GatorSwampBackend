@@ -21,9 +21,10 @@ type CreatePostRequest struct {
 
 // VoteRequest represents a request to vote on a post
 type VoteRequest struct {
-	UserID   string `json:"userId"`
-	PostID   string `json:"postId"`
-	IsUpvote bool   `json:"isUpvote"`
+	UserID     string `json:"userId"`
+	PostID     string `json:"postId"`
+	IsUpvote   bool   `json:"isUpvote"`
+	RemoveVote bool   `json:"removeVote"` // New field to support vote toggling
 }
 
 // HandleHealth handles health check requests
@@ -235,9 +236,10 @@ func (s *Server) HandleVote() http.HandlerFunc {
 		}
 
 		future := s.Context.RequestFuture(s.EnginePID, &actors.VotePostMsg{
-			PostID:   postID,
-			UserID:   userID,
-			IsUpvote: req.IsUpvote,
+			PostID:     postID,
+			UserID:     userID,
+			IsUpvote:   req.IsUpvote,
+			RemoveVote: req.RemoveVote, // Pass the RemoveVote parameter
 		}, s.RequestTimeout)
 
 		result, err := future.Result()

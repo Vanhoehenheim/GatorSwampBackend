@@ -282,6 +282,15 @@ func (m *MongoDB) SaveCommentVote(ctx context.Context, userID, commentID uuid.UU
 	return err
 }
 
+// CountPostComments counts the number of comments for a post
+func (m *MongoDB) CountPostComments(ctx context.Context, postID uuid.UUID) (int, error) {
+	count, err := m.Comments.CountDocuments(ctx, bson.M{"postId": postID.String()})
+	if err != nil {
+		return 0, fmt.Errorf("failed to count post comments: %v", err)
+	}
+	return int(count), nil
+}
+
 // Add this as a temporary fix method in comment_repository.go
 func (m *MongoDB) FixCommentSubreddits(ctx context.Context) error {
 	cursor, err := m.Comments.Find(ctx, bson.M{})
