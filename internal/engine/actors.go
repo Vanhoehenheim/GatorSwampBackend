@@ -37,25 +37,25 @@ type (
 
 // Engine coordinates communication between actors
 type Engine struct {
+	context        *actor.RootContext // Use RootContext
+	metrics        *utils.MetricsCollector
+	db             database.DBAdapter // Database adapter interface
+	userSupervisor *actor.PID
 	subredditActor *actor.PID
 	postActor      *actor.PID
 	commentActor   *actor.PID
-	userSupervisor *actor.PID
-	context        *actor.RootContext
-	metrics        *utils.MetricsCollector
-	mongodb        *database.MongoDB // Add MongoDB field
 }
 
 // NewEngine creates a new engine instance with all required actors
-func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector, mongodb *database.MongoDB) *Engine {
+func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector, db database.DBAdapter) *Engine {
 	context := system.Root
 	log.Printf("Creating Engine with actors...")
 
 	// Create the Engine first
 	e := &Engine{
-		context: context,
+		context: context, // Assign RootContext here
 		metrics: metrics,
-		mongodb: mongodb,
+		db:      db, // Assign the db interface
 	}
 
 	// Create props with Engine's PID
@@ -66,16 +66,19 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector, mongo
 
 	// Now create other actors with enginePID
 	supervisorProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewUserSupervisor(e.mongodb)
+		// TODO: Update NewUserSupervisor signature
+		return actors.NewUserSupervisor(e.db) // Pass db interface
 	})
 
 	subredditProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewSubredditActor(metrics, e.mongodb)
+		// TODO: Update NewSubredditActor signature
+		return actors.NewSubredditActor(metrics, e.db) // Pass db interface
 	})
 
 	// Create the CommentActor first
 	commentProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewCommentActor(enginePID, e.mongodb)
+		// TODO: Update NewCommentActor signature
+		return actors.NewCommentActor(enginePID, e.db) // Pass db interface
 	})
 
 	userSupervisorPID := context.Spawn(supervisorProps)
@@ -84,7 +87,8 @@ func NewEngine(system *actor.ActorSystem, metrics *utils.MetricsCollector, mongo
 
 	// Create PostActor and pass CommentActor PID to it
 	postProps := actor.PropsFromProducer(func() actor.Actor {
-		return actors.NewPostActor(metrics, enginePID, e.mongodb, commentPID)
+		// TODO: Update NewPostActor signature
+		return actors.NewPostActor(metrics, enginePID, e.db, commentPID) // Pass db interface
 	})
 	postPID := context.Spawn(postProps)
 
@@ -217,10 +221,6 @@ func (e *Engine) Receive(context actor.Context) {
 		}
 		context.Respond(result)
 
-	case *actors.UpdateKarmaMsg:
-		log.Printf("Engine: Forwarding karma update to UserSupervisor")
-		context.Send(e.userSupervisor, msg)
-
 	case *actors.GetUserFeedMsg:
 		// First validate user exists
 		userFuture := context.RequestFuture(e.userSupervisor,
@@ -301,8 +301,7 @@ func isUserMessage(msg interface{}) bool {
 	case *actors.RegisterUserMsg,
 		*actors.LoginMsg,
 		*actors.GetUserProfileMsg,
-		*actors.UpdateProfileMsg,
-		*actors.UpdateKarmaMsg:
+		*actors.UpdateProfileMsg:
 		return true
 	default:
 		return false
@@ -339,6 +338,6 @@ func (e *Engine) GetCommentActor() *actor.PID {
 	return e.commentActor
 }
 
-func (e *Engine) GetMongoDB() *database.MongoDB {
-	return e.mongodb
+func (e *Engine) GetDB() database.DBAdapter {
+	return e.db
 }

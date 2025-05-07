@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"gator-swamp/internal/engine/actors"
+	"gator-swamp/internal/middleware"
 	"gator-swamp/internal/utils"
+	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -148,8 +151,33 @@ func (s *Server) HandlePost() http.HandlerFunc {
 					return
 				}
 
+				// ---- Start: Extract UserID from JWT ----
+				var requestingUserID uuid.UUID = uuid.Nil // Default to Nil UUID if not found or error
+				// Use the exported UserIDKey from the middleware package
+				userIDClaim := r.Context().Value(middleware.UserIDKey)
+				if userIDClaim != nil {
+					// Assert the type to uuid.UUID directly, as stored by SetUserIDInContext
+					parsedID, ok := userIDClaim.(uuid.UUID)
+					if !ok {
+						log.Printf("HandlePost GET: Invalid user ID type in token context key. Expected uuid.UUID, got %T", userIDClaim)
+						// Depending on policy, might treat as anonymous or return error
+						// http.Error(w, "Invalid user ID type in token", http.StatusInternalServerError)
+						// return
+					} else {
+						requestingUserID = parsedID
+					}
+				} else {
+					// User is likely not logged in, requestingUserID remains uuid.Nil
+					log.Printf("HandlePost GET: No user ID found in context (user likely not authenticated)")
+				}
+				// ---- End: Extract UserID from JWT ----
+
+				// Send message to actor including requesting user ID
 				future := s.Context.RequestFuture(s.Engine.GetPostActor(),
-					&actors.GetPostMsg{PostID: id},
+					&actors.GetPostMsg{
+						PostID:           id,
+						RequestingUserID: requestingUserID, // Pass the extracted/parsed user ID
+					},
 					s.RequestTimeout)
 
 				result, err := future.Result()
@@ -278,15 +306,28 @@ func (s *Server) HandleRecentPosts() http.HandlerFunc {
 			return
 		}
 
-		limit := 10 // Default limit
-		// You can add logic to parse a limit parameter from the query string if needed
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if limit <= 0 {
+			limit = 20 // Default limit
+		}
 
-		// Send request to PostActor through Engine
-		future := s.Context.RequestFuture(
-			s.Engine.GetPostActor(),
-			&actors.GetRecentPostsMsg{Limit: limit},
-			s.RequestTimeout,
-		)
+		// Extract requesting user ID from context
+		requestingUserID := uuid.Nil // Default to Nil if no user is authenticated
+		if userIDStr, ok := r.Context().Value(middleware.UserIDKey).(string); ok {
+			if parsedUUID, err := uuid.Parse(userIDStr); err == nil {
+				requestingUserID = parsedUUID
+			} else {
+				log.Printf("HandleRecentPosts: Error parsing UserID from context: %v", err)
+			}
+		}
+
+		// Send message to PostActor
+		future := s.Context.RequestFuture(s.Engine.GetPostActor(), &actors.GetRecentPostsMsg{
+			Limit:            limit,
+			Offset:           offset,
+			RequestingUserID: requestingUserID, // Pass the user ID
+		}, s.RequestTimeout)
 
 		result, err := future.Result()
 		if err != nil {

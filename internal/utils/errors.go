@@ -112,3 +112,25 @@ func IsAuthError(err error) bool {
 	}
 	return false
 }
+
+// AppErrorToHTTPStatus converts an AppError code to an HTTP status code.
+func AppErrorToHTTPStatus(errorCode string) int {
+	switch errorCode {
+	case ErrNotFound, ErrUserNotFound, ErrSubredditNotFound, ErrActorNotFound:
+		return 404 // http.StatusNotFound
+	case ErrInvalidInput, ErrInvalidCredentials:
+		return 400 // http.StatusBadRequest
+	case ErrUnauthorized, ErrInvalidToken:
+		return 401 // http.StatusUnauthorized
+	case ErrForbidden, ErrNotSubredditMember:
+		return 403 // http.StatusForbidden
+	case ErrDuplicate, ErrUserAlreadyExists, ErrSubredditExists, ErrAlreadySubredditMember:
+		return 409 // http.StatusConflict
+	case ErrTooManyRequests:
+		return 429 // http.StatusTooManyRequests
+	case ErrDatabase, ErrActorTimeout, ErrMessageRejected:
+		return 500 // http.StatusInternalServerError
+	default:
+		return 500 // http.StatusInternalServerError for unknown errors
+	}
+}

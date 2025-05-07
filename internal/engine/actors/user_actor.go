@@ -25,15 +25,15 @@ type UserSupervisor struct {
 	userActors map[uuid.UUID]*actor.PID // Maps user IDs to their corresponding actor PIDs
 	emailToID  map[string]uuid.UUID     // Maps emails to user IDs for quick lookup
 	mu         sync.RWMutex             // Manages concurrent access to maps
-	mongodb    *database.MongoDB
+	db         database.DBAdapter       // Database adapter interface
 }
 
-// NewUserSupervisor initializes a new UserSupervisor with MongoDB connection.
-func NewUserSupervisor(mongodb *database.MongoDB) actor.Actor {
+// NewUserSupervisor initializes a new UserSupervisor with DBAdapter.
+func NewUserSupervisor(db database.DBAdapter) actor.Actor {
 	return &UserSupervisor{
 		userActors: make(map[uuid.UUID]*actor.PID),
 		emailToID:  make(map[string]uuid.UUID),
-		mongodb:    mongodb,
+		db:         db, // Assign the db interface
 	}
 }
 
@@ -52,11 +52,6 @@ type (
 		NewEmail    string
 	}
 
-	UpdateKarmaMsg struct {
-		UserID uuid.UUID
-		Delta  int
-	}
-
 	GetUserProfileMsg struct {
 		UserID uuid.UUID
 	}
@@ -64,13 +59,6 @@ type (
 	LoginMsg struct {
 		Email    string
 		Password string
-	}
-
-	VoteMsg struct {
-		UserID     uuid.UUID
-		TargetID   uuid.UUID
-		TargetType string // "post" or "comment"
-		IsUpvote   bool
 	}
 
 	GetFeedMsg struct {
@@ -106,8 +94,6 @@ type UserState struct {
 	AuthToken      string
 	Subreddits     []uuid.UUID
 	SubredditNames []string // New field
-	VotedPosts     map[uuid.UUID]bool
-	VotedComments  map[uuid.UUID]bool
 }
 
 // Receive is the main message handler for the UserSupervisor.
@@ -120,11 +106,12 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		// Check if the email is already registered in MongoDB
+		// Check if the email is already registered
 		ctx := stdctx.Background()
-		existingUser, _ := s.mongodb.GetUserByEmail(ctx, msg.Email)
+		// TODO: Add GetUserByEmail to DBAdapter interface
+		existingUser, _ := s.db.GetUserByEmail(ctx, msg.Email)
 		if existingUser != nil {
-			log.Printf("Email already exists in MongoDB: %s", msg.Email)
+			log.Printf("Email already exists in DB: %s", msg.Email)
 			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Email already registered", nil))
 			return
 		}
@@ -132,7 +119,8 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		// Create a new user actor for this user
 		userID := uuid.New()
 		props := actor.PropsFromProducer(func() actor.Actor {
-			return NewUserActor(userID, msg, s.mongodb)
+			// TODO: Update NewUserActor signature
+			return NewUserActor(userID, msg, s.db)
 		})
 
 		pid := context.Spawn(props)
@@ -153,11 +141,12 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 	case *LoginMsg:
 		log.Printf("UserSupervisor: Processing login request for email: %s", msg.Email)
 
-		// Fetch user from MongoDB by email
+		// Fetch user from DB by email
 		ctx := stdctx.Background()
-		user, err := s.mongodb.GetUserByEmail(ctx, msg.Email)
+		// TODO: Add GetUserByEmail to DBAdapter interface
+		user, err := s.db.GetUserByEmail(ctx, msg.Email)
 		if err != nil {
-			log.Printf("UserSupervisor: User not found in MongoDB: %v", err)
+			log.Printf("UserSupervisor: User not found in DB: %v", err)
 			context.Respond(&types.LoginResponse{
 				Success: false,
 				Error:   "Invalid credentials",
@@ -171,14 +160,15 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		s.mu.RUnlock()
 
 		if !exists {
-			// Create a new actor for this existing user from MongoDB
+			// Create a new actor for this existing user from DB
 			props := actor.PropsFromProducer(func() actor.Actor {
+				// TODO: Update NewUserActor signature
 				return NewUserActor(user.ID, &RegisterUserMsg{
 					Username: user.Username,
 					Email:    user.Email,
-					Password: "", // Actual password is from MongoDB
+					Password: "", // Actual password is from DB
 					Karma:    user.Karma,
-				}, s.mongodb)
+				}, s.db)
 			})
 			pid = context.Spawn(props)
 
@@ -203,10 +193,11 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		// Respond with the login result (token or error)
 		context.Respond(result)
 
-		// Handle user profile retrieval
+	// Handle user profile retrieval
 	case *GetUserProfileMsg:
 		ctx := stdctx.Background()
-		user, err := s.mongodb.GetUser(ctx, msg.UserID)
+		// TODO: Add GetUser to DBAdapter interface
+		user, err := s.db.GetUser(ctx, msg.UserID)
 		if err != nil {
 			if utils.IsErrorCode(err, utils.ErrUserNotFound) {
 				context.Respond(nil)
@@ -219,7 +210,8 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 		// Get the names of all subreddits
 		subredditNames := make([]string, 0, len(user.Subreddits))
 		for _, subID := range user.Subreddits {
-			subreddit, err := s.mongodb.GetSubredditByID(ctx, subID)
+			// TODO: Add GetSubredditByID to DBAdapter interface
+			subreddit, err := s.db.GetSubredditByID(ctx, subID)
 			if err != nil {
 				log.Printf("Error fetching subreddit %s: %v", subID, err)
 				continue
@@ -238,42 +230,14 @@ func (s *UserSupervisor) Receive(context actor.Context) {
 			LastActive:     user.LastActive,
 			Subreddits:     user.Subreddits,
 			SubredditNames: subredditNames,
-			// Initialize empty maps for voted posts/comments
-			VotedPosts:    make(map[uuid.UUID]bool),
-			VotedComments: make(map[uuid.UUID]bool),
 		}
 
 		context.Respond(response)
-
-	// Handle karma updates
-	case *UpdateKarmaMsg:
-		s.mu.RLock()
-		pid, exists := s.userActors[msg.UserID]
-		s.mu.RUnlock()
-
-		if !exists {
-			log.Printf("UserSupervisor: User %s not found for karma update in userstate", msg.UserID)
-		}
-
-		// Update MongoDB first
-		ctx := stdctx.Background()
-		err := s.mongodb.UpdateUserKarma(ctx, msg.UserID, msg.Delta)
-		if err != nil {
-			log.Printf("UserSupervisor: Failed to update karma in MongoDB for user %s: %v", msg.UserID, err)
-			return
-		}
-
-		// Then update the actor's state
-
-		if exists {
-			log.Printf("UserSupervisor: Forwarding karma update to user actor %s", msg.UserID)
-			context.Send(pid, msg)
-		}
 	}
 }
 
 // getOrCreateUserActor ensures that a user actor exists for the given userID.
-// If it doesn't, it fetches the user from MongoDB and creates a new actor.
+// If it doesn't, it fetches the user from the database and creates a new actor.
 func (s *UserSupervisor) getOrCreateUserActor(context actor.Context, userID uuid.UUID) (*actor.PID, error) {
 	s.mu.RLock()
 	pid, exists := s.userActors[userID]
@@ -283,9 +247,10 @@ func (s *UserSupervisor) getOrCreateUserActor(context actor.Context, userID uuid
 		return pid, nil
 	}
 
-	// Fetch user details from MongoDB
+	// Fetch user details from the database
 	ctx := stdctx.Background()
-	user, err := s.mongodb.GetUser(ctx, userID)
+	// TODO: Add GetUser to DBAdapter interface
+	user, err := s.db.GetUser(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +262,7 @@ func (s *UserSupervisor) getOrCreateUserActor(context actor.Context, userID uuid
 			Email:    user.Email,
 			Password: user.HashedPassword, // Use hashed password directly
 			Karma:    user.Karma,
-		}, s.mongodb)
+		}, s.db)
 	})
 
 	pid = context.Spawn(props)
@@ -313,29 +278,27 @@ func (s *UserSupervisor) getOrCreateUserActor(context actor.Context, userID uuid
 // UserActor is responsible for managing the state of a single user.
 // It handles messages related to user registration, login, profile updates, voting, etc.
 type UserActor struct {
-	id      uuid.UUID
-	state   *UserState
-	mongodb *database.MongoDB
+	id    uuid.UUID
+	state *UserState
+	db    database.DBAdapter
 }
 
 // NewUserActor creates a new user actor with initial user state, typically during registration or actor creation for an existing user.
-func NewUserActor(id uuid.UUID, msg *RegisterUserMsg, mongodb *database.MongoDB) *UserActor {
+func NewUserActor(id uuid.UUID, msg *RegisterUserMsg, db database.DBAdapter) *UserActor {
 	return &UserActor{
 		id: id,
 		state: &UserState{
-			ID:            id,
-			Username:      msg.Username,
-			Email:         msg.Email,
-			Karma:         300, // Default initial karma
-			IsConnected:   true,
-			LastActive:    time.Now(),
-			Posts:         make([]uuid.UUID, 0),
-			Comments:      make([]uuid.UUID, 0),
-			VotedPosts:    make(map[uuid.UUID]bool),
-			VotedComments: make(map[uuid.UUID]bool),
-			Subreddits:    make([]uuid.UUID, 0),
+			ID:          id,
+			Username:    msg.Username,
+			Email:       msg.Email,
+			Karma:       300, // Default initial karma
+			IsConnected: true,
+			LastActive:  time.Now(),
+			Posts:       make([]uuid.UUID, 0),
+			Comments:    make([]uuid.UUID, 0),
+			Subreddits:  make([]uuid.UUID, 0),
 		},
-		mongodb: mongodb,
+		db: db,
 	}
 }
 
@@ -361,52 +324,49 @@ func (a *UserActor) Receive(context actor.Context) {
 
 	// Handle user registration inside the user actor
 	case *RegisterUserMsg:
+		log.Printf("UserActor [%s]: Registering new user", a.id)
+
+		// Hash password
 		hashedPassword, err := hashPassword(msg.Password)
 		if err != nil {
 			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "Failed to hash password", err))
 			return
 		}
 
-		// Update actor state with newly registered user info
-		a.state.Username = msg.Username
-		a.state.Email = msg.Email
-		a.state.HashedPassword = hashedPassword
-		a.state.Karma = 300
-		a.state.Subreddits = make([]uuid.UUID, 0)
-
-		// Create a user model for MongoDB storage
+		// Create a user model for database storage
 		user := &models.User{
-			ID:             a.state.ID,
-			Username:       a.state.Username,
-			Email:          a.state.Email,
+			ID:             a.id,
+			Username:       msg.Username,
+			Email:          msg.Email,
 			HashedPassword: hashedPassword,
-			Karma:          a.state.Karma,
+			Karma:          msg.Karma,
 			CreatedAt:      time.Now(),
 			LastActive:     time.Now(),
 			IsConnected:    true,
 			Subreddits:     a.state.Subreddits,
 		}
 
-		// Persist the user in MongoDB
+		// Persist the user in the database
 		ctx := stdctx.Background()
-		if err := a.mongodb.SaveUser(ctx, user); err != nil {
-			log.Printf("Failed to save user to MongoDB: %v", err)
+		// TODO: Add SaveUser to DBAdapter interface
+		if err := a.db.SaveUser(ctx, user); err != nil {
+			log.Printf("Failed to save user to DB: %v", err)
 			context.Respond(utils.NewAppError(utils.ErrInvalidInput, "Failed to save user", err))
 			return
 		}
 
-		log.Printf("Successfully created user %s in MongoDB", a.state.ID)
+		log.Printf("Successfully created user %s in DB", a.id)
 
 		context.Respond(&UserState{
-			ID:       a.state.ID,
-			Username: a.state.Username,
-			Email:    a.state.Email,
-			Karma:    a.state.Karma,
+			ID:       a.id,
+			Username: msg.Username,
+			Email:    msg.Email,
+			Karma:    msg.Karma,
 		})
 
 	// Handle user profile updates (username/email)
 	case *UpdateProfileMsg:
-		if a.state.ID == msg.UserID {
+		if a.id == msg.UserID {
 			a.state.Username = msg.NewUsername
 			a.state.Email = msg.NewEmail
 			context.Respond(true)
@@ -414,41 +374,46 @@ func (a *UserActor) Receive(context actor.Context) {
 			context.Respond(false)
 		}
 
-	// Handle karma updates
-	case *UpdateKarmaMsg:
-		if a.state.ID == msg.UserID {
-			log.Printf("UserActor: Updating karma for user %s by %d", msg.UserID, msg.Delta)
-			a.state.Karma += msg.Delta
-		}
-
 	// Handle user profile retrieval
 	case *GetUserProfileMsg:
+		// Fetch latest persistent data from DB
 		ctx := stdctx.Background()
-		user, err := a.mongodb.GetUser(ctx, msg.UserID)
+		user, err := a.db.GetUser(ctx, msg.UserID)
 		if err != nil {
-			if utils.IsErrorCode(err, utils.ErrUserNotFound) {
+			if utils.IsErrorCode(err, utils.ErrNotFound) {
 				context.Respond(nil) // User not found
 				return
 			}
-			log.Printf("Error fetching user from MongoDB: %v", err)
-			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch user", err))
+			log.Printf("Error fetching user %s from DB for profile: %v", msg.UserID, err)
+			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch user profile data", err))
 			return
 		}
 
-		// Update actor state from the database record
-		a.state = &UserState{
-			ID:             user.ID,
-			Username:       user.Username,
-			Email:          user.Email,
-			Karma:          user.Karma,
-			IsConnected:    user.IsConnected,
-			LastActive:     user.LastActive,
-			HashedPassword: user.HashedPassword,
-			Subreddits:     user.Subreddits,
-			VotedPosts:     make(map[uuid.UUID]bool),
-			VotedComments:  make(map[uuid.UUID]bool),
-		}
+		// Update actor state with fetched persistent data,
+		// preserving volatile state (IsConnected, LastActive, AuthToken)
+		a.state.Username = user.Username
+		a.state.Email = user.Email
+		a.state.Karma = user.Karma
+		a.state.HashedPassword = user.HashedPassword // Keep password hash synchronized
+		a.state.Subreddits = user.Subreddits
+		// a.state.IsConnected is managed by Connect/Disconnect messages
+		// a.state.LastActive is managed by Connect/Login messages
+		// a.state.AuthToken is managed by Login messages
 
+		// Fetch subreddit names based on the updated list
+		subredditNames := make([]string, 0, len(a.state.Subreddits))
+		for _, subID := range a.state.Subreddits {
+			subreddit, err := a.db.GetSubredditByID(ctx, subID)
+			if err != nil {
+				log.Printf("Error fetching subreddit %s for user %s profile: %v", subID, msg.UserID, err)
+				// Optionally add a placeholder or skip
+				continue
+			}
+			subredditNames = append(subredditNames, subreddit.Name)
+		}
+		a.state.SubredditNames = subredditNames
+
+		// Respond with the updated actor state
 		context.Respond(a.state)
 
 	// Handle user login
@@ -456,9 +421,9 @@ func (a *UserActor) Receive(context actor.Context) {
 		log.Printf("Processing login request for email: %s", msg.Email)
 
 		ctx := stdctx.Background()
-		user, err := a.mongodb.GetUserByEmail(ctx, msg.Email)
+		user, err := a.db.GetUserByEmail(ctx, msg.Email)
 		if err != nil {
-			log.Printf("Login failed - Error fetching user from MongoDB: %v", err)
+			log.Printf("Login failed - Error fetching user from DB: %v", err)
 			context.Respond(&types.LoginResponse{
 				Success: false,
 				Error:   "Invalid credentials",
@@ -488,10 +453,10 @@ func (a *UserActor) Receive(context actor.Context) {
 			return
 		}
 
-		// Update user activity in MongoDB
-		err = a.mongodb.UpdateUserActivity(ctx, user.ID, true)
+		// Update user activity in the database
+		err = a.db.UpdateUserActivity(ctx, user.ID, true)
 		if err != nil {
-			log.Printf("Warning: Failed to update user activity in MongoDB: %v", err)
+			log.Printf("Warning: Failed to update user activity in DB: %v", err)
 		}
 
 		// Update actor state with new auth token and connection status
@@ -504,8 +469,6 @@ func (a *UserActor) Receive(context actor.Context) {
 			LastActive:     time.Now(),
 			AuthToken:      token,
 			HashedPassword: user.HashedPassword,
-			VotedPosts:     make(map[uuid.UUID]bool),
-			VotedComments:  make(map[uuid.UUID]bool),
 			Subreddits:     user.Subreddits,
 		}
 
@@ -516,33 +479,6 @@ func (a *UserActor) Receive(context actor.Context) {
 			Token:   token,
 			UserID:  user.ID.String(),
 		})
-
-	// Handle voting (upvotes/downvotes on posts or comments)
-	case *VoteMsg:
-		var previousVote bool
-		var exists bool
-
-		// Check if user already voted on this target
-		if msg.TargetType == "post" {
-			previousVote, exists = a.state.VotedPosts[msg.TargetID]
-		} else {
-			previousVote, exists = a.state.VotedComments[msg.TargetID]
-		}
-
-		// If the vote is the same as before, respond with an error
-		if exists && previousVote == msg.IsUpvote {
-			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
-			return
-		}
-
-		// Record the new vote
-		if msg.TargetType == "post" {
-			a.state.VotedPosts[msg.TargetID] = msg.IsUpvote
-		} else {
-			a.state.VotedComments[msg.TargetID] = msg.IsUpvote
-		}
-
-		context.Respond(true)
 
 	// Handle feed additions — checks if the user follows the subreddit before adding
 	case *AddToFeedMsg:
@@ -564,5 +500,8 @@ func (a *UserActor) Receive(context actor.Context) {
 	case *DisconnectUserMsg:
 		a.state.IsConnected = false
 		context.Respond(true)
+
+	default:
+		log.Printf("UserActor %s received unknown message type: %T", a.id, msg)
 	}
 }

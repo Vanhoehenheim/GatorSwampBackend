@@ -18,10 +18,22 @@ type ServerConfig struct {
 	MetricsEnabled bool
 }
 
+// DatabaseConfig holds database configuration settings
+type DatabaseConfig struct {
+	Type     string // "postgres" - MongoDB is no longer supported
+	URI      string
+	Host     string
+	Port     int
+	User     string
+	Password string
+	Name     string
+	SSLMode  string
+}
+
 // Config holds the complete application configuration
 type Config struct {
 	Server         *ServerConfig
-	MongoDBURI     string
+	Database       *DatabaseConfig
 	AllowedOrigins []string
 	Debug          bool
 }
@@ -32,6 +44,15 @@ func DefaultConfig() *ServerConfig {
 		Port:           8080,
 		Host:           "0.0.0.0", // Change from "localhost" to "0.0.0.0"
 		MetricsEnabled: true,
+	}
+}
+
+// DefaultDatabaseConfig provides default database settings
+func DefaultDatabaseConfig() *DatabaseConfig {
+	return &DatabaseConfig{
+		Type:    "postgres", // Default to PostgreSQL
+		Port:    5432,       // Default PostgreSQL port
+		SSLMode: "require",  // Default to requiring SSL for security
 	}
 }
 
@@ -77,16 +98,82 @@ func LoadConfig() (*Config, error) {
 		serverConfig.MetricsEnabled = metricsEnabled == "true"
 	}
 
-	// Get MongoDB URI from environment variable
-	mongoURI := os.Getenv("MONGODB_URI")
-	if mongoURI == "" {
-		return nil, fmt.Errorf("MONGODB_URI environment variable is required")
+	// Initialize database config
+	dbConfig := DefaultDatabaseConfig()
+
+	// Get database type
+	if dbType := os.Getenv("DB_TYPE"); dbType != "" {
+		dbConfig.Type = dbType
 	}
+
+	// Set up database connection based on type
+	switch dbConfig.Type {
+	case "postgres":
+		// Prioritize DATABASE_URL if provided
+		if uri := os.Getenv("DATABASE_URL"); uri != "" {
+			dbConfig.URI = uri
+			// Optional: Parse URI to populate individual fields if needed elsewhere
+			// For now, sqlx.Connect works directly with the URI, so parsing isn't strictly required here.
+			// We can skip the individual variable checks.
+			// Attempt to extract SSLMode for consistency, default if not parsable
+			dbConfig.SSLMode = getSSLModeFromURI(uri)
+		} else {
+			// Fallback to individual variables if DATABASE_URL is not set
+			dbConfig.Host = getEnvOrDefault("DB_HOST", "localhost")
+
+			if portStr := os.Getenv("DB_PORT"); portStr != "" {
+				if port, err := strconv.Atoi(portStr); err == nil {
+					dbConfig.Port = port
+				}
+			}
+
+			dbConfig.User = os.Getenv("DB_USER")
+			if dbConfig.User == "" {
+				return nil, fmt.Errorf("DB_USER environment variable is required when DB_TYPE is postgres and DATABASE_URL is not set")
+			}
+
+			dbConfig.Password = os.Getenv("DB_PASSWORD")
+			if dbConfig.Password == "" {
+				return nil, fmt.Errorf("DB_PASSWORD environment variable is required when DB_TYPE is postgres and DATABASE_URL is not set")
+			}
+
+			dbConfig.Name = getEnvOrDefault("DB_NAME", "postgres")
+			dbConfig.SSLMode = getEnvOrDefault("DB_SSL_MODE", "require")
+
+			// Build connection string from individual parts
+			dbConfig.URI = fmt.Sprintf(
+				"postgresql://%s:%s@%s:%d/%s?sslmode=%s",
+				dbConfig.User,
+				dbConfig.Password,
+				dbConfig.Host,
+				dbConfig.Port,
+				dbConfig.Name,
+				dbConfig.SSLMode,
+			)
+		}
+	default:
+		// If the type is not explicitly postgres, assume postgres
+		if dbConfig.Type != "postgres" {
+			fmt.Printf("Warning: Unsupported DB_TYPE '%s'. Defaulting to 'postgres'.\n", dbConfig.Type)
+			dbConfig.Type = "postgres"
+			// Re-run the postgres case logic if we defaulted
+			goto postgresCase // Use goto to avoid duplicating the postgres logic
+		}
+		// If it was already postgres but somehow ended up here, error out
+		return nil, fmt.Errorf("invalid configuration state for database type: %s", dbConfig.Type)
+	}
+
+	// Add a label for the goto statement
+postgresCase:
+	// This label is the target for the goto in the default case.
+	// The logic for postgres connection setup should follow immediately,
+	// but it is already present in the original case "postgres" block.
+	// No code needed here as the switch structure handles it.
 
 	// Initialize complete config
 	config := &Config{
 		Server:         serverConfig,
-		MongoDBURI:     mongoURI,
+		Database:       dbConfig,
 		AllowedOrigins: []string{"*"}, // Default to allow all origins
 		Debug:          false,
 	}
@@ -101,4 +188,31 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return config, nil
+}
+
+// Helper function to get environment variable with default fallback
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// Helper function to extract sslmode from a DSN, defaults to "require"
+func getSSLModeFromURI(uri string) string {
+	// Basic parsing, might need enhancement for more complex URIs
+	if strings.Contains(uri, "sslmode=") {
+		parts := strings.Split(uri, "?")
+		if len(parts) > 1 {
+			queryParams := strings.Split(parts[1], "&")
+			for _, param := range queryParams {
+				kv := strings.SplitN(param, "=", 2)
+				if len(kv) == 2 && kv[0] == "sslmode" {
+					return kv[1]
+				}
+			}
+		}
+	}
+	// Default if not found or not parsable
+	return "require"
 }

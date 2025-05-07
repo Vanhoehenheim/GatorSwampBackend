@@ -10,9 +10,7 @@ import (
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	// "go.mongodb.org/mongo-driver/mongo" // No longer needed for this file's logic
 )
 
 // Message types for Post operations
@@ -25,7 +23,8 @@ type (
 	}
 
 	GetPostMsg struct {
-		PostID uuid.UUID
+		PostID           uuid.UUID
+		RequestingUserID uuid.UUID
 	}
 
 	GetSubredditPostsMsg struct {
@@ -36,12 +35,14 @@ type (
 		PostID     uuid.UUID
 		UserID     uuid.UUID
 		IsUpvote   bool
-		RemoveVote bool // New field to support vote toggling
+		RemoveVote bool // If true, vote is removed regardless of IsUpvote
 	}
 
 	GetUserFeedMsg struct {
-		UserID uuid.UUID
-		Limit  int
+		UserID           uuid.UUID `json:"userId"` // User whose feed is being requested
+		Limit            int       `json:"limit"`
+		Offset           int       `json:"offset"`
+		RequestingUserID uuid.UUID `json:"requestingUserId"` // User making the request (for vote status)
 	}
 
 	DeletePostMsg struct {
@@ -54,37 +55,31 @@ type (
 	initializePostActorMsg struct{}
 	loadPostsFromDBMsg     struct{}
 
-	// Internal struct for tracking votes
-	voteStatus struct {
-		IsUpvote bool
-		VotedAt  time.Time
-	}
-
 	GetRecentPostsMsg struct {
-		Limit int
+		Limit            int       `json:"limit"`
+		Offset           int       `json:"offset"`
+		RequestingUserID uuid.UUID `json:"requestingUserId"`
 	}
 )
 
-// PostActor handles post-related operations
+// PostActor manages posts and related operations.
 type PostActor struct {
-	postsByID       map[uuid.UUID]*models.Post             // Cache for posts by their ID
-	subredditPosts  map[uuid.UUID][]uuid.UUID              // Mapping of subreddit IDs to their posts
-	postVotes       map[uuid.UUID]map[uuid.UUID]voteStatus // Tracking user votes for posts
-	metrics         *utils.MetricsCollector                // Metrics for performance tracking
-	enginePID       *actor.PID                             // Reference to the Engine actor
-	mongodb         *database.MongoDB                      // MongoDB client
-	commentActorPID *actor.PID                             // Reference to the Comment actor
+	postsByID       map[uuid.UUID]*models.Post // Cache for posts by their ID
+	subredditPosts  map[uuid.UUID][]uuid.UUID  // Mapping of subreddit IDs to their posts
+	metrics         *utils.MetricsCollector    // Metrics for performance tracking
+	enginePID       *actor.PID                 // Reference to the Engine actor
+	db              database.DBAdapter         // Database adapter interface
+	commentActorPID *actor.PID                 // PID of the CommentActor for interaction
 }
 
 // NewPostActor creates a new PostActor instance
-func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID, mongodb *database.MongoDB, commentActorPID *actor.PID) actor.Actor {
+func NewPostActor(metrics *utils.MetricsCollector, enginePID *actor.PID, db database.DBAdapter, commentActorPID *actor.PID) actor.Actor {
 	return &PostActor{
 		postsByID:       make(map[uuid.UUID]*models.Post),
 		subredditPosts:  make(map[uuid.UUID][]uuid.UUID),
-		postVotes:       make(map[uuid.UUID]map[uuid.UUID]voteStatus),
 		metrics:         metrics,
 		enginePID:       enginePID,
-		mongodb:         mongodb,
+		db:              db,
 		commentActorPID: commentActorPID,
 	}
 }
@@ -124,36 +119,36 @@ func (a *PostActor) Receive(context actor.Context) {
 	}
 }
 
-// Handles loading all posts from MongoDB into memory during initialization
+// Handles loading all posts from DB into memory during initialization
 func (a *PostActor) handleLoadPosts(context actor.Context) {
+	log.Println("PostActor: Loading initial posts from database...")
 	ctx := stdctx.Background()
 
-	cursor, err := a.mongodb.Posts.Find(ctx, bson.M{})
+	posts, err := a.db.GetAllPosts(ctx)
 	if err != nil {
-		log.Printf("Error loading posts from MongoDB: %v", err)
+		log.Printf("PostActor: CRITICAL - Failed to load initial posts: %v", err)
+		// Consider how to handle this - retry? panic? For now, log and continue with empty cache.
 		return
 	}
-	defer cursor.Close(ctx)
 
-	for cursor.Next(ctx) {
-		var doc database.PostDocument
-		if err := cursor.Decode(&doc); err != nil {
-			log.Printf("Error decoding post document: %v", err)
-			continue
-		}
-
-		post, err := a.mongodb.DocumentToModel(&doc)
-		if err != nil {
-			log.Printf("Error converting document to model: %v", err)
-			continue
+	loadedCount := 0
+	for _, post := range posts {
+		// Populate derived fields (essential for cache consistency if used directly)
+		// We need the actor context for getCommentCount
+		if err := a.populatePostDetails(ctx, context, post); err != nil {
+			log.Printf("PostActor: Warning - Failed to populate details for post %s during initial load: %v", post.ID, err)
+			// Continue caching the post even if details are incomplete
 		}
 
 		a.postsByID[post.ID] = post
-		a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
+		if _, ok := a.subredditPosts[post.SubredditID]; !ok {
+			a.subredditPosts[post.SubredditID] = make([]uuid.UUID, 0)
+		}
 		a.subredditPosts[post.SubredditID] = append(a.subredditPosts[post.SubredditID], post.ID)
+		loadedCount++
 	}
 
-	log.Printf("Loaded %d posts from MongoDB", len(a.postsByID))
+	log.Printf("PostActor: Finished loading %d posts into cache.", loadedCount)
 }
 
 // Handles creating a new post
@@ -162,14 +157,14 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 	ctx := stdctx.Background()
 
 	// Fetch the user to get their username
-	user, err := a.mongodb.GetUser(ctx, msg.AuthorID)
+	user, err := a.db.GetUser(ctx, msg.AuthorID)
 	if err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch author details", err))
 		return
 	}
 
 	// Fetch the subreddit to get its name
-	subreddit, err := a.mongodb.GetSubredditByID(ctx, msg.SubredditID)
+	subreddit, err := a.db.GetSubredditByID(ctx, msg.SubredditID)
 	if err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch subreddit details", err))
 		return
@@ -180,25 +175,27 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 		Title:          msg.Title,
 		Content:        msg.Content,
 		AuthorID:       msg.AuthorID,
-		AuthorUsername: user.Username,
+		AuthorUsername: user.Username, // Populated from fetched user
 		SubredditID:    msg.SubredditID,
-		SubredditName:  subreddit.Name,
+		SubredditName:  subreddit.Name, // Populated from fetched subreddit
 		CreatedAt:      time.Now(),
-		Upvotes:        0,
-		Downvotes:      0,
-		Karma:          0,
-		UserVotes:      make(map[string]bool), // Initialize UserVotes map
+		UpdatedAt:      time.Now(), // Initialize UpdatedAt
+		Karma:          1,          // Start with 1 karma (initial upvote from author?)
+		CommentCount:   0,
+		// UserVotes field removed
 	}
 
-	postDoc := a.mongodb.ModelToDocument(newPost)
-	if _, err := a.mongodb.Posts.InsertOne(ctx, postDoc); err != nil {
+	if err := a.db.SavePost(ctx, newPost); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save post", err))
 		return
 	}
 
-	// Update local caches and respond as before
+	// TODO: Consider if author should automatically upvote their own post via RecordVote?
+	// For now, just save the post with karma 1.
+
+	// Update local caches
 	a.postsByID[newPost.ID] = newPost
-	a.postVotes[newPost.ID] = make(map[uuid.UUID]voteStatus)
+	// a.postVotes[newPost.ID] = make(map[uuid.UUID]voteStatus) // REMOVED
 	a.subredditPosts[msg.SubredditID] = append(a.subredditPosts[msg.SubredditID], newPost.ID)
 
 	a.metrics.AddOperationLatency("create_post", time.Since(startTime))
@@ -207,28 +204,31 @@ func (a *PostActor) handleCreatePost(context actor.Context, msg *CreatePostMsg) 
 
 // Handles retrieving a specific post by ID
 func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
+	// Prefer cache, but fallback to DB
+	// NOTE: Cache does not currently store user-specific vote status.
+	// If cache hits, the CurrentUserVote will be nil. A DB refetch is needed for this.
+	// Consider invalidating cache more aggressively or enhancing cache structure.
 	if post, exists := a.postsByID[msg.PostID]; exists {
-		// Ensure UserVotes is initialized
-		if post.UserVotes == nil {
-			post.UserVotes = make(map[string]bool)
-		}
-
-		// Count comments for this post
-		commentCount, err := a.getCommentCount(msg.PostID)
-		if err != nil {
-			log.Printf("Error counting comments for post %s: %v", msg.PostID, err)
+		// Temporarily, we will still fetch from DB if requesting user is provided
+		// to get their vote status, even if the post is cached.
+		// A better approach would be to store vote status separately or enhance the post cache.
+		if msg.RequestingUserID != uuid.Nil {
+			// Fall through to DB fetch to get user-specific vote status
 		} else {
-			post.CommentCount = commentCount
+			// Populate derived fields for cached post (without user vote)
+			if err := a.populatePostDetails(stdctx.Background(), context, post); err != nil {
+				log.Printf("Error populating cached post %s details: %v", msg.PostID, err)
+			}
+			context.Respond(post) // Respond with cached post (no user vote info)
+			return
 		}
-
-		context.Respond(post)
-		return
 	}
 
 	ctx := stdctx.Background()
-	post, err := a.mongodb.GetPost(ctx, msg.PostID)
+	// Modified DB call to include requesting user ID
+	post, err := a.db.GetPost(ctx, msg.PostID, msg.RequestingUserID)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if appErr, ok := err.(*utils.AppError); ok && appErr.Code == utils.ErrNotFound {
 			context.Respond(utils.NewAppError(utils.ErrNotFound, "Post not found", nil))
 		} else {
 			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch post", err))
@@ -236,269 +236,147 @@ func (a *PostActor) handleGetPost(context actor.Context, msg *GetPostMsg) {
 		return
 	}
 
-	// Ensure UserVotes is initialized
-	if post.UserVotes == nil {
-		post.UserVotes = make(map[string]bool)
+	// Populate derived fields for DB-fetched post
+	if err := a.populatePostDetails(ctx, context, post); err != nil {
+		log.Printf("Error populating fetched post %s details: %v", msg.PostID, err)
+		// Respond with post data anyway, but maybe log error
 	}
 
-	// Count comments for this post
-	commentCount, err := a.getCommentCount(msg.PostID)
-	if err != nil {
-		log.Printf("Error counting comments for post %s: %v", msg.PostID, err)
-	} else {
-		post.CommentCount = commentCount
-	}
-
+	// Cache the fetched post
 	a.postsByID[post.ID] = post
-	a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
-	a.subredditPosts[post.SubredditID] = append(a.subredditPosts[post.SubredditID], post.ID)
+	// Initialize subreddit post list if needed
+	if _, ok := a.subredditPosts[post.SubredditID]; !ok {
+		a.subredditPosts[post.SubredditID] = make([]uuid.UUID, 0)
+	}
+	// Avoid adding duplicate if already present (edge case)
+	found := false
+	for _, existingID := range a.subredditPosts[post.SubredditID] {
+		if existingID == post.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		a.subredditPosts[post.SubredditID] = append(a.subredditPosts[post.SubredditID], post.ID)
+	}
 
 	context.Respond(post)
 }
 
-// Handles retrieving all posts for a subreddit
+// Handles retrieving posts for a specific subreddit
 func (a *PostActor) handleGetSubredditPosts(context actor.Context, msg *GetSubredditPostsMsg) {
-	log.Printf("Fetching posts for subreddit: %s", msg.SubredditID)
-
-	// Query MongoDB directly for the latest data
+	log.Printf("Getting posts for subreddit %s", msg.SubredditID)
 	ctx := stdctx.Background()
-	posts, err := a.mongodb.GetSubredditPosts(ctx, msg.SubredditID)
+
+	// Need to define defaults or add pagination to msg
+	defaultLimit := 50 // Example limit
+	defaultOffset := 0 // Example offset
+
+	posts, err := a.db.GetPostsBySubreddit(ctx, msg.SubredditID, defaultLimit, defaultOffset)
 	if err != nil {
-		log.Printf("Error fetching subreddit posts: %v", err)
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch subreddit posts", err))
+		log.Printf("Error fetching posts for subreddit %s from DB: %v", msg.SubredditID, err)
+		// Use NewAppError for consistency
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "failed to fetch subreddit posts", err))
 		return
 	}
 
-	if len(posts) == 0 {
-		log.Printf("No posts found for subreddit: %s", msg.SubredditID)
-		context.Respond([]*models.Post{}) // Return empty array instead of error
-		return
-	}
-
-	// Update local cache with fetched posts
+	// Populate derived fields for each post
 	for _, post := range posts {
-		a.postsByID[post.ID] = post
-		if _, exists := a.postVotes[post.ID]; !exists {
-			a.postVotes[post.ID] = make(map[uuid.UUID]voteStatus)
-		}
-
-		// Count comments for each post
-		commentCount, err := a.getCommentCount(post.ID)
-		if err != nil {
-			log.Printf("Error counting comments for post %s: %v", post.ID, err)
-		} else {
-			post.CommentCount = commentCount
+		if err := a.populatePostDetails(ctx, context, post); err != nil {
+			log.Printf("Error populating details for post %s in subreddit %s feed: %v", post.ID, msg.SubredditID, err)
+			// Continue with potentially incomplete post data
 		}
 	}
 
-	log.Printf("Found %d posts for subreddit: %s", len(posts), msg.SubredditID)
 	context.Respond(posts)
 }
 
-// Handles voting on a post
+// Handles voting on a post using the DBAdapter
 func (a *PostActor) handleVote(context actor.Context, msg *VotePostMsg) {
 	startTime := time.Now()
-
-	post, exists := a.postsByID[msg.PostID]
-	if !exists {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "Post not found", nil))
-		return
-	}
-
-	if _, exists := a.postVotes[msg.PostID]; !exists {
-		a.postVotes[msg.PostID] = make(map[uuid.UUID]voteStatus)
-	}
-
-	previousVote, hasVoted := a.postVotes[msg.PostID][msg.UserID]
-
-	// Calculate vote changes
-	upvoteDelta := 0
-	downvoteDelta := 0
-
-	// Handle the different voting scenarios
-	if hasVoted {
-		if msg.RemoveVote && previousVote.IsUpvote == msg.IsUpvote {
-			// Remove an existing vote if the user is clicking the same button again
-			if msg.IsUpvote {
-				upvoteDelta = -1
-				post.Upvotes--
-			} else {
-				downvoteDelta = -1
-				post.Downvotes--
-			}
-			// Delete the vote record
-			delete(a.postVotes[msg.PostID], msg.UserID)
-		} else if previousVote.IsUpvote == msg.IsUpvote {
-			// This is a duplicate vote without the RemoveVote flag - keep old behavior
-			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
-			return
-		} else {
-			// Changing from upvote to downvote or vice versa
-			if msg.IsUpvote {
-				upvoteDelta = 1
-				downvoteDelta = -1
-				post.Downvotes--
-				post.Upvotes++
-			} else {
-				upvoteDelta = -1
-				downvoteDelta = 1
-				post.Upvotes--
-				post.Downvotes++
-			}
-			// Update vote record
-			a.postVotes[msg.PostID][msg.UserID] = voteStatus{
-				IsUpvote: msg.IsUpvote,
-				VotedAt:  time.Now(),
-			}
-		}
-	} else {
-		// New vote
-		if msg.IsUpvote {
-			upvoteDelta = 1
-			post.Upvotes++
-		} else {
-			downvoteDelta = 1
-			post.Downvotes++
-		}
-		// Create new vote record (only if not removing a non-existent vote)
-		if !msg.RemoveVote {
-			a.postVotes[msg.PostID][msg.UserID] = voteStatus{
-				IsUpvote: msg.IsUpvote,
-				VotedAt:  time.Now(),
-			}
-		}
-	}
-
-	// Update post karma
-	post.Karma = post.Upvotes - post.Downvotes
-
-	// Update MongoDB
 	ctx := stdctx.Background()
-	err := a.mongodb.UpdatePostVotes(ctx, post.ID, upvoteDelta, downvoteDelta)
+
+	var direction models.VoteDirection
+	if msg.RemoveVote {
+		direction = models.VoteNone
+	} else if msg.IsUpvote {
+		direction = models.VoteUp
+	} else {
+		direction = models.VoteDown
+	}
+
+	err := a.db.RecordVote(ctx, msg.UserID, msg.PostID, models.PostVote, direction)
 	if err != nil {
-		log.Printf("Failed to update post votes in MongoDB: %v", err)
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to persist vote", err))
+		log.Printf("Error recording vote for post %s by user %s: %v", msg.PostID, msg.UserID, err)
+		// Use NewAppError instead of WrapAppError
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "failed to process vote", err))
 		return
 	}
 
-	// Update user karma (only for non-toggle operations or when switching vote types)
-	// Skip karma update if we're just removing a vote
-	karmaChange := 0
-	if upvoteDelta == 1 {
-		karmaChange = 1
-	} else if downvoteDelta == 1 {
-		karmaChange = -1
-	}
-
-	if karmaChange != 0 {
-		context.Send(a.enginePID, &UpdateKarmaMsg{
-			UserID: post.AuthorID,
-			Delta:  karmaChange,
-		})
-	}
-
-	// Add UserVotes field to response to help frontend show correct state
-	if post.UserVotes == nil {
-		post.UserVotes = make(map[string]bool)
-	}
-
-	// Update the UserVotes for the current user
-	if hasVote, hasVoted := a.postVotes[msg.PostID][msg.UserID]; hasVoted {
-		post.UserVotes[msg.UserID.String()] = hasVote.IsUpvote
-	} else {
-		// Remove the user's vote if they toggled it off
-		delete(post.UserVotes, msg.UserID.String())
-	}
-
-	// Count comments for this post
-	commentCount, err := a.getCommentCount(msg.PostID)
-	if err != nil {
-		log.Printf("Error counting comments for post %s: %v", msg.PostID, err)
-	} else {
-		post.CommentCount = commentCount
-	}
+	// Invalidate or update cache? For now, let's invalidate.
+	delete(a.postsByID, msg.PostID)
 
 	a.metrics.AddOperationLatency("vote_post", time.Since(startTime))
-	context.Respond(post)
+	context.Respond(&struct{ Success bool }{Success: true}) // Simple success response
 }
 
-// Handles fetching the user's feed
+// Handles retrieving a personalized feed for a user
 func (a *PostActor) handleGetUserFeed(context actor.Context, msg *GetUserFeedMsg) {
-	startTime := time.Now()
-	ctx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
-	defer cancel()
-
-	feedPosts, err := a.mongodb.GetUserFeedPosts(ctx, msg.UserID, msg.Limit)
-	if err != nil {
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to get feed posts", err))
-		return
-	}
-
-	// Add comment count to each post
-	for _, post := range feedPosts {
-		commentCount, err := a.getCommentCount(post.ID)
-		if err != nil {
-			log.Printf("Error counting comments for post %s: %v", post.ID, err)
-		} else {
-			post.CommentCount = commentCount
-		}
-	}
-
-	a.metrics.AddOperationLatency("get_feed", time.Since(startTime))
-	context.Respond(feedPosts)
-}
-
-func (a *PostActor) handleGetRecentPosts(context actor.Context, msg *GetRecentPostsMsg) {
+	log.Printf("Generating feed for user %s, limit %d, offset %d, requesting user %s", msg.UserID, msg.Limit, msg.Offset, msg.RequestingUserID)
 	ctx := stdctx.Background()
 
-	// Set up options for sorting by creation date
-	opts := options.Find().
-		SetSort(bson.D{{Key: "createdat", Value: -1}}).
-		SetLimit(int64(msg.Limit))
-
-	// Query MongoDB for recent posts
-	cursor, err := a.mongodb.Posts.Find(ctx, bson.M{}, opts)
+	posts, err := a.db.GetUserFeed(ctx, msg.UserID, msg.Limit, msg.Offset, msg.RequestingUserID)
 	if err != nil {
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch recent posts", err))
-		return
-	}
-	defer cursor.Close(ctx)
-
-	var posts []*models.Post
-	for cursor.Next(ctx) {
-		var doc database.PostDocument
-		if err := cursor.Decode(&doc); err != nil {
-			log.Printf("Error decoding post document: %v", err)
-			continue
-		}
-
-		post, err := a.mongodb.DocumentToModel(&doc)
-		if err != nil {
-			log.Printf("Error converting document to model: %v", err)
-			continue
-		}
-
-		// Count comments for each post
-		commentCount, err := a.getCommentCount(post.ID)
-		if err != nil {
-			log.Printf("Error counting comments for post %s: %v", post.ID, err)
-		} else {
-			post.CommentCount = commentCount
-		}
-
-		posts = append(posts, post)
-	}
-
-	if err := cursor.Err(); err != nil {
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Error reading posts", err))
+		log.Printf("Error fetching user feed for %s: %v", msg.UserID, err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "failed to fetch user feed", err))
 		return
 	}
 
 	context.Respond(posts)
 }
 
-// Helper function to get comment count for a post
-func (a *PostActor) getCommentCount(postID uuid.UUID) (int, error) {
+// Handles retrieving the most recent posts
+func (a *PostActor) handleGetRecentPosts(context actor.Context, msg *GetRecentPostsMsg) {
+	log.Printf("PostActor: Received GetRecentPostsMsg: Limit=%d, Offset=%d, RequestingUserID=%s", msg.Limit, msg.Offset, msg.RequestingUserID)
 	ctx := stdctx.Background()
-	return a.mongodb.CountPostComments(ctx, postID)
+	posts, err := a.db.GetRecentPosts(ctx, msg.Limit, msg.Offset, msg.RequestingUserID)
+	if err != nil {
+		log.Printf("PostActor: Error getting recent posts: %v", err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "failed to fetch recent posts", err))
+		return
+	}
+
+	context.Respond(posts)
+}
+
+// populatePostDetails fetches author username, subreddit name.
+// Comment count is now assumed to be up-to-date from the database.
+func (a *PostActor) populatePostDetails(ctx stdctx.Context, context actor.Context, post *models.Post) error {
+	// Fetch author username
+	author, err := a.db.GetUser(ctx, post.AuthorID)
+	if err != nil {
+		// Log error but don't fail entirely, maybe author was deleted
+		log.Printf("Warning: Failed to fetch author %s for post %s: %v", post.AuthorID, post.ID, err)
+		post.AuthorUsername = "[deleted]"
+	} else {
+		post.AuthorUsername = author.Username
+	}
+
+	// Fetch subreddit name
+	subreddit, err := a.db.GetSubredditByID(ctx, post.SubredditID)
+	if err != nil {
+		// Log error but don't fail entirely
+		log.Printf("Warning: Failed to fetch subreddit %s for post %s: %v", post.SubredditID, post.ID, err)
+		post.SubredditName = "[unknown]"
+	} else {
+		post.SubredditName = subreddit.Name
+	}
+
+	// Comment count is now sourced directly from the database query (e.g., in GetPost, GetRecentPosts)
+	// and should be up-to-date due to transactional updates in SaveComment and DeleteCommentAndDecrementCount.
+	// Thus, no need to call a.getCommentCount(context, post.ID) here anymore.
+
+	// Note: Upvotes/Downvotes are not populated here as they aren't stored directly.
+	// Karma is fetched from DB.
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"gator-swamp/internal/database"
 	"gator-swamp/internal/engine"
 	"gator-swamp/internal/utils"
+	"gator-swamp/internal/websocket"
 	"time"
 
 	"github.com/asynkron/protoactor-go/actor"
@@ -18,8 +19,12 @@ type Server struct {
 	Metrics            *utils.MetricsCollector
 	CommentActor       *actor.PID
 	DirectMessageActor *actor.PID
-	MongoDB            *database.MongoDB
+	DB                 database.DBAdapter
 	RequestTimeout     time.Duration
+	Hub                *websocket.Hub
+	PostActor          *actor.PID
+	SubredditActor     *actor.PID
+	UserSupervisor     *actor.PID
 }
 
 // NewServer creates a new Server instance with the given components
@@ -31,7 +36,12 @@ func NewServer(
 	metrics *utils.MetricsCollector,
 	commentActor *actor.PID,
 	directMessageActor *actor.PID,
-	mongodb *database.MongoDB,
+	db database.DBAdapter,
+	hub *websocket.Hub,
+	postActor *actor.PID,
+	subredditActor *actor.PID,
+	userSupervisor *actor.PID,
+	timeout time.Duration,
 ) *Server {
 	return &Server{
 		System:             system,
@@ -41,7 +51,11 @@ func NewServer(
 		Metrics:            metrics,
 		CommentActor:       commentActor,
 		DirectMessageActor: directMessageActor,
-		MongoDB:            mongodb,
-		RequestTimeout:     5 * time.Second, // Default timeout for actor requests
+		DB:                 db,
+		RequestTimeout:     timeout,
+		Hub:                hub,
+		PostActor:          postActor,
+		SubredditActor:     subredditActor,
+		UserSupervisor:     userSupervisor,
 	}
 }

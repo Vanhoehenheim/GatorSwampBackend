@@ -8,7 +8,10 @@ import (
 	"gator-swamp/internal/types"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
+
+	"gator-swamp/internal/utils"
 
 	"github.com/google/uuid"
 )
@@ -225,50 +228,34 @@ func (s *Server) HandleGetAllUsers() http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
-		cursor, err := s.MongoDB.Users.Find(ctx, map[string]interface{}{})
+		log.Printf("HandleGetAllUsers: Fetching all users")
+
+		// Use the DBAdapter to fetch users
+		users, err := s.DB.GetAllUsers(r.Context())
 		if err != nil {
-			http.Error(w, "Failed to fetch users", http.StatusInternalServerError)
+			log.Printf("HandleGetAllUsers: Error fetching users: %v", err)
+			// Check if it's an AppError
+			if appErr, ok := err.(*utils.AppError); ok {
+				// Map AppError code to HTTP status (add more cases as needed)
+				statusCode := http.StatusInternalServerError
+				if appErr.Code == utils.ErrDatabase {
+					statusCode = http.StatusInternalServerError
+				}
+				http.Error(w, appErr.Error(), statusCode)
+			} else {
+				// Generic internal error for other types of errors
+				http.Error(w, "Failed to fetch users", http.StatusInternalServerError)
+			}
 			return
 		}
-		defer cursor.Close(ctx)
 
-		var users []struct {
-			ID       string    `json:"id"`
-			Username string    `json:"username"`
-			Email    string    `json:"email"`
-			Karma    int       `json:"karma"`
-			JoinedAt time.Time `json:"joinedAt"`
-		}
-
-		for cursor.Next(ctx) {
-			var user struct {
-				ID        string    `bson:"_id"`
-				Username  string    `bson:"username"`
-				Email     string    `bson:"email"`
-				Karma     int       `bson:"karma"`
-				CreatedAt time.Time `bson:"createdAt"`
-			}
-			if err := cursor.Decode(&user); err != nil {
-				continue
-			}
-			users = append(users, struct {
-				ID       string    `json:"id"`
-				Username string    `json:"username"`
-				Email    string    `json:"email"`
-				Karma    int       `json:"karma"`
-				JoinedAt time.Time `json:"joinedAt"`
-			}{
-				ID:       user.ID,
-				Username: user.Username,
-				Email:    user.Email,
-				Karma:    user.Karma,
-				JoinedAt: user.CreatedAt,
-			})
-		}
+		log.Printf("HandleGetAllUsers: Returning %d users", len(users))
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(users)
+		if err := json.NewEncoder(w).Encode(users); err != nil {
+			log.Printf("HandleGetAllUsers: Error encoding response: %v", err)
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -280,28 +267,31 @@ func (s *Server) HandleGetFeed() http.HandlerFunc {
 			return
 		}
 
-		userIDStr := r.URL.Query().Get("userId")
-		if userIDStr == "" {
-			http.Error(w, "User ID required", http.StatusBadRequest)
+		// Get the UserID whose feed is requested (should be the authenticated user)
+		userIDClaim := r.Context().Value(middleware.UserIDKey)
+		userID, ok := userIDClaim.(uuid.UUID)
+		if !ok {
+			log.Printf("HandleGetFeed: Invalid user ID type in token context key. Expected uuid.UUID, got %T", userIDClaim)
+			http.Error(w, "Authentication required", http.StatusUnauthorized)
 			return
 		}
 
-		userID, err := uuid.Parse(userIDStr)
-		if err != nil {
-			http.Error(w, "Invalid user ID format", http.StatusBadRequest)
-			return
+		// Parse limit and offset from query parameters
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if limit <= 0 {
+			limit = 20 // Default limit
+		}
+		if offset < 0 {
+			offset = 0 // Default offset
 		}
 
-		// Get limit from query params, default to 50
-		limit := 50
-		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-			fmt.Sscanf(limitStr, "%d", &limit)
-		}
-
-		// Send to Engine
+		// Send request via Engine to UserSupervisor
 		future := s.Context.RequestFuture(s.EnginePID, &actors.GetUserFeedMsg{
-			UserID: userID,
-			Limit:  limit,
+			UserID:           userID, // User whose feed is requested
+			Limit:            limit,
+			Offset:           offset,
+			RequestingUserID: userID, // User making the request
 		}, s.RequestTimeout)
 
 		result, err := future.Result()

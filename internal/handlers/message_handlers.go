@@ -178,18 +178,12 @@ func (s *Server) HandleMarkMessageRead() http.HandlerFunc {
 		}
 
 		var req struct {
-			MessageID string `json:"messageId"`
-			UserID    string `json:"userId"`
+			MessageIds []string `json:"messageIds"`
+			UserID     string   `json:"userId"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		messageID, err := uuid.Parse(req.MessageID)
-		if err != nil {
-			http.Error(w, "Invalid message ID", http.StatusBadRequest)
 			return
 		}
 
@@ -199,19 +193,31 @@ func (s *Server) HandleMarkMessageRead() http.HandlerFunc {
 			return
 		}
 
-		msg := &actors.MarkMessageReadMsg{
-			MessageID: messageID,
-			UserID:    userID,
-		}
-
-		future := s.Context.RequestFuture(s.DirectMessageActor, msg, s.RequestTimeout)
-		result, err := future.Result()
-		if err != nil {
-			http.Error(w, "Failed to mark message as read", http.StatusInternalServerError)
-			return
+		results := make(map[string]bool)
+		for _, mid := range req.MessageIds {
+			messageID, err := uuid.Parse(mid)
+			if err != nil {
+				results[mid] = false
+				continue
+			}
+			msg := &actors.MarkMessageReadMsg{
+				MessageID: messageID,
+				UserID:    userID,
+			}
+			future := s.Context.RequestFuture(s.DirectMessageActor, msg, s.RequestTimeout)
+			result, err := future.Result()
+			if err != nil {
+				results[mid] = false
+				continue
+			}
+			if success, ok := result.(bool); ok && success {
+				results[mid] = true
+			} else {
+				results[mid] = false
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		json.NewEncoder(w).Encode(results)
 	}
 }

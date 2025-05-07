@@ -10,7 +10,6 @@ import (
 
 	"github.com/asynkron/protoactor-go/actor"
 	"github.com/google/uuid"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 // Message types for CommentActor
@@ -39,13 +38,19 @@ type (
 	}
 
 	GetCommentsForPostMsg struct {
-		PostID uuid.UUID `json:"postId"`
+		PostID           uuid.UUID `json:"postId"`
+		RequestingUserID uuid.UUID `json:"requestingUserId,omitempty"`
 	}
 
 	VoteCommentMsg struct {
-		CommentID uuid.UUID `json:"commentId"`
-		UserID    uuid.UUID `json:"userId"`
-		IsUpvote  bool      `json:"isUpvote"`
+		CommentID  uuid.UUID `json:"commentId"`
+		UserID     uuid.UUID `json:"userId"`
+		IsUpvote   bool      `json:"isUpvote"`
+		RemoveVote bool      `json:"removeVote"`
+	}
+
+	GetCommentCountMsg struct {
+		PostID uuid.UUID `json:"postId"`
 	}
 
 	loadCommentsFromDBMsg struct{}
@@ -55,18 +60,18 @@ type (
 type CommentActor struct {
 	comments     map[uuid.UUID]*models.Comment
 	postComments map[uuid.UUID][]uuid.UUID
-	commentVotes map[uuid.UUID]map[uuid.UUID]bool
 	enginePID    *actor.PID
-	mongodb      *database.MongoDB
+	db           database.DBAdapter
+	userCache    map[uuid.UUID]string // Simple cache for usernames
 }
 
-func NewCommentActor(enginePID *actor.PID, mongodb *database.MongoDB) actor.Actor {
+func NewCommentActor(enginePID *actor.PID, db database.DBAdapter) actor.Actor {
 	return &CommentActor{
 		comments:     make(map[uuid.UUID]*models.Comment),
 		postComments: make(map[uuid.UUID][]uuid.UUID),
-		commentVotes: make(map[uuid.UUID]map[uuid.UUID]bool),
 		enginePID:    enginePID,
-		mongodb:      mongodb,
+		db:           db,
+		userCache:    make(map[uuid.UUID]string), // Initialize user cache
 	}
 }
 
@@ -99,81 +104,86 @@ func (a *CommentActor) Receive(context actor.Context) {
 
 	case *VoteCommentMsg:
 		a.handleVoteComment(context, msg)
+
+	case *GetCommentCountMsg:
+		a.handleGetCommentCount(context, msg)
+
+	default:
+		log.Printf("CommentActor: Unknown message type %T", msg)
+	}
+}
+
+// Helper function to get username, using cache first
+func (a *CommentActor) getUsername(ctx stdctx.Context, userID uuid.UUID) string {
+	if username, ok := a.userCache[userID]; ok {
+		return username
+	}
+
+	user, err := a.db.GetUser(ctx, userID)
+	if err != nil {
+		log.Printf("Error fetching user %s for username: %v", userID, err)
+		return "[unknown]" // Return placeholder on error
+	}
+
+	// Cache the username
+	a.userCache[userID] = user.Username
+	return user.Username
+}
+
+// Helper function to populate usernames for a slice of comments
+func (a *CommentActor) populateUsernames(ctx stdctx.Context, comments []*models.Comment) {
+	for _, comment := range comments {
+		if comment.AuthorUsername == "" { // Populate only if missing
+			comment.AuthorUsername = a.getUsername(ctx, comment.AuthorID)
+		}
 	}
 }
 
 func (a *CommentActor) handleLoadComments(context actor.Context) {
+	log.Println("CommentActor: Loading initial comments from database...")
 	ctx := stdctx.Background()
-	// Find all comments
-	cursor, err := a.mongodb.Comments.Find(ctx, bson.M{})
+
+	comments, err := a.db.GetAllComments(ctx)
 	if err != nil {
-		log.Printf("Error loading comments from MongoDB: %v", err)
+		log.Printf("CommentActor: CRITICAL - Failed to load initial comments: %v", err)
 		return
 	}
-	defer cursor.Close(ctx)
 
-	// Iterate through cursor results
-	for cursor.Next(ctx) {
-		var doc database.CommentDocument
-		if err := cursor.Decode(&doc); err != nil {
-			log.Printf("Error decoding comment: %v", err)
-			continue
+	// Populate usernames after loading
+	a.populateUsernames(ctx, comments)
+
+	loadedCount := 0
+	for _, comment := range comments {
+		// Username should now be populated by populateUsernames
+		a.comments[comment.ID] = comment
+		if _, ok := a.postComments[comment.PostID]; !ok {
+			a.postComments[comment.PostID] = make([]uuid.UUID, 0)
 		}
-
-		// Get the parsed IDs
-		id, _ := uuid.Parse(doc.ID)
-		authorID, _ := uuid.Parse(doc.AuthorID)
-		postID, _ := uuid.Parse(doc.PostID)
-		subredditID, _ := uuid.Parse(doc.SubredditID)
-
-		// Parse parent ID if it exists
-		var parentID *uuid.UUID
-		if doc.ParentID != nil {
-			parsed, _ := uuid.Parse(*doc.ParentID)
-			parentID = &parsed
-		}
-
-		// Convert children string IDs to UUID
-		children := make([]uuid.UUID, 0)
-		for _, childStr := range doc.Children {
-			if childID, err := uuid.Parse(childStr); err == nil {
-				children = append(children, childID)
+		// Avoid duplicates in postComments list if loaded multiple times?
+		found := false
+		for _, existingID := range a.postComments[comment.PostID] {
+			if existingID == comment.ID {
+				found = true
+				break
 			}
 		}
-
-		// Create the comment
-		comment := &models.Comment{
-			ID:             id,
-			Content:        doc.Content,
-			AuthorID:       authorID,
-			AuthorUsername: doc.AuthorUsername,
-			PostID:         postID,
-			SubredditID:    subredditID,
-			ParentID:       parentID,
-			Children:       children,
-			CreatedAt:      doc.CreatedAt,
-			UpdatedAt:      doc.UpdatedAt,
-			IsDeleted:      doc.IsDeleted,
-			Upvotes:        doc.Upvotes,
-			Downvotes:      doc.Downvotes,
-			Karma:          doc.Karma,
+		if !found {
+			a.postComments[comment.PostID] = append(a.postComments[comment.PostID], comment.ID)
 		}
-
-		// Update local caches
-		a.comments[comment.ID] = comment
-		a.postComments[comment.PostID] = append(a.postComments[comment.PostID], comment.ID)
-		a.commentVotes[comment.ID] = make(map[uuid.UUID]bool)
+		loadedCount++
 	}
 
-	log.Printf("Loaded %d comments from MongoDB", len(a.comments))
+	log.Printf("CommentActor: Finished loading %d comments into cache.", loadedCount)
 }
+
 func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCommentMsg) {
 	// Add initial logging
 	log.Printf("Creating new comment for post %s by user %s", msg.PostID, msg.AuthorID)
 
 	// First, fetch the post to get its subredditID
 	ctx := stdctx.Background()
-	post, err := a.mongodb.GetPost(ctx, msg.PostID)
+	// Pass uuid.Nil as requestingUserID, as we only need subredditID here
+	post, err := a.db.GetPost(ctx, msg.PostID, uuid.Nil)
 	if err != nil {
 		log.Printf("Error fetching post: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch parent post", err))
@@ -181,7 +191,7 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 	}
 
 	// Fetch the user to get their username
-	user, err := a.mongodb.GetUser(ctx, msg.AuthorID)
+	user, err := a.db.GetUser(ctx, msg.AuthorID)
 	if err != nil {
 		log.Printf("Error fetching user: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch author details", err))
@@ -204,14 +214,12 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		IsDeleted:      false,
-		Upvotes:        0,
-		Downvotes:      0,
-		Karma:          0,
+		Karma:          1, // Start with 1 karma (author's implicit upvote?)
 	}
 	if msg.ParentID != nil {
 		log.Printf("This is a reply to comment ID: %s", msg.ParentID.String())
 
-		parentComment, err := a.mongodb.GetComment(ctx, *msg.ParentID)
+		parentComment, err := a.db.GetComment(ctx, *msg.ParentID)
 		if err != nil {
 			log.Printf("Error fetching parent comment: %v", err)
 			if utils.IsErrorCode(err, utils.ErrNotFound) {
@@ -226,20 +234,25 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		parentComment.Children = append(parentComment.Children, commentID)
 		parentComment.UpdatedAt = now
 
-		// Save updated parent comment
-		if err := a.mongodb.SaveComment(ctx, parentComment); err != nil {
-			log.Printf("Error updating parent comment: %v", err)
-			context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update parent comment", err))
-			return
-		}
+		// Temporarily comment out saving the parent to isolate the issue
+		/*
+			// Save updated parent comment
+			if err := a.db.SaveComment(ctx, parentComment); err != nil {
+				log.Printf("Error updating parent comment: %v", err)
+				context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update parent comment", err))
+				return
+			}
+		*/
 
 		// Update cache
 		a.comments[parentComment.ID] = parentComment
 	}
 
+	// Add log right before saving the NEW comment
+	log.Printf("Before saving NEW comment %s, ParentID is: %v", newComment.ID, newComment.ParentID)
 	// Save the new comment
-	if err := a.mongodb.SaveComment(ctx, newComment); err != nil {
-		log.Printf("Error saving comment to MongoDB: %v", err)
+	if err := a.db.SaveComment(ctx, newComment); err != nil {
+		log.Printf("Error saving comment to database: %v", err)
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to save comment", err))
 		return
 	}
@@ -247,7 +260,6 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 	// Update local cache for the new comment
 	a.comments[commentID] = newComment
 	a.postComments[msg.PostID] = append(a.postComments[msg.PostID], commentID)
-	a.commentVotes[commentID] = make(map[uuid.UUID]bool)
 
 	// Create response
 	response := struct {
@@ -262,8 +274,6 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		CreatedAt      time.Time `json:"createdAt"`
 		UpdatedAt      time.Time `json:"updatedAt"`
 		IsDeleted      bool      `json:"isDeleted"`
-		Upvotes        int       `json:"upvotes"`
-		Downvotes      int       `json:"downvotes"`
 		Karma          int       `json:"karma"`
 	}{
 		ID:             newComment.ID.String(),
@@ -276,8 +286,6 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 		CreatedAt:      newComment.CreatedAt,
 		UpdatedAt:      newComment.UpdatedAt,
 		IsDeleted:      newComment.IsDeleted,
-		Upvotes:        newComment.Upvotes,
-		Downvotes:      newComment.Downvotes,
 		Karma:          newComment.Karma,
 	}
 
@@ -287,6 +295,8 @@ func (a *CommentActor) handleCreateComment(context actor.Context, msg *CreateCom
 	}
 
 	log.Printf("Successfully created comment with ID: %s", commentID)
+	// Log the response struct right before sending
+	log.Printf("Responding to handler with: %+v", response)
 	context.Respond(response)
 }
 
@@ -312,9 +322,9 @@ func (a *CommentActor) handleEditComment(context actor.Context, msg *EditComment
 	comment.Content = msg.Content
 	comment.UpdatedAt = time.Now()
 
-	// Update in MongoDB
+	// Update in database
 	ctx := stdctx.Background()
-	if err := a.mongodb.SaveComment(ctx, comment); err != nil {
+	if err := a.db.SaveComment(ctx, comment); err != nil {
 		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update comment", err))
 		return
 	}
@@ -323,54 +333,63 @@ func (a *CommentActor) handleEditComment(context actor.Context, msg *EditComment
 }
 
 func (a *CommentActor) handleDeleteComment(context actor.Context, msg *DeleteCommentMsg) {
-	comment, exists := a.comments[msg.CommentID]
-	if !exists {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", nil))
+	ctx := stdctx.Background()
+	log.Printf("Attempting to delete comment ID: %s by user %s", msg.CommentID, msg.AuthorID)
+
+	// Optional: Fetch the comment to verify authorship before deleting
+	comment, err := a.db.GetComment(ctx, msg.CommentID)
+	if err != nil {
+		if utils.IsErrorCode(err, utils.ErrNotFound) {
+			log.Printf("Comment %s not found for deletion.", msg.CommentID)
+			context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", nil))
+			return
+		}
+		log.Printf("Error fetching comment %s for deletion: %v", msg.CommentID, err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch comment for deletion", err))
 		return
 	}
 
 	if comment.AuthorID != msg.AuthorID {
-		context.Respond(utils.NewAppError(utils.ErrUnauthorized, "Not authorized to delete comment", nil))
+		log.Printf("User %s unauthorized to delete comment %s (author is %s)", msg.AuthorID, msg.CommentID, comment.AuthorID)
+		context.Respond(utils.NewAppError(utils.ErrUnauthorized, "User not authorized to delete this comment", nil))
 		return
 	}
 
-	comment.IsDeleted = true
-	comment.Content = "[deleted]"
-	comment.UpdatedAt = time.Now()
-
-	// Update in MongoDB
-	ctx := stdctx.Background()
-	if err := a.mongodb.SaveComment(ctx, comment); err != nil {
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to delete comment", err))
+	// Perform hard delete using the new database function
+	err = a.db.DeleteCommentAndDecrementCount(ctx, msg.CommentID)
+	if err != nil {
+		// Log the detailed error from the DB layer
+		log.Printf("Error during DeleteCommentAndDecrementCount for comment %s: %v", msg.CommentID, err)
+		// Respond with the error passed up from the DB layer
+		context.Respond(err) // err from DB should already be an AppError or wrapped
 		return
 	}
 
-	// Recursively handle child comments if any
-	for _, childID := range comment.Children {
-		a.deleteCommentAndChildren(context, childID)
-	}
-
-	context.Respond(true)
-}
-
-func (a *CommentActor) deleteCommentAndChildren(context actor.Context, commentID uuid.UUID) {
-	if comment, exists := a.comments[commentID]; exists {
-		comment.IsDeleted = true
-		comment.Content = "[deleted]"
-		comment.UpdatedAt = time.Now()
-
-		// Update in MongoDB
-		ctx := stdctx.Background()
-		if err := a.mongodb.SaveComment(ctx, comment); err != nil {
-			log.Printf("Error deleting child comment %s: %v", commentID, err)
-			return
-		}
-
-		for _, childID := range comment.Children {
-			a.deleteCommentAndChildren(context, childID)
+	// If successful, update local caches (if any)
+	delete(a.comments, msg.CommentID)
+	if comment.PostID != uuid.Nil {
+		if postCommentIDs, ok := a.postComments[comment.PostID]; ok {
+			newPostCommentIDs := make([]uuid.UUID, 0, len(postCommentIDs)-1)
+			for _, id := range postCommentIDs {
+				if id != msg.CommentID {
+					newPostCommentIDs = append(newPostCommentIDs, id)
+				}
+			}
+			a.postComments[comment.PostID] = newPostCommentIDs
 		}
 	}
+	// TODO: Handle recursive deletion of child comments if required.
+	// The current `deleteCommentAndChildren` logic would need to be adapted
+	// to use `DeleteCommentAndDecrementCount` for each child as well.
+	// For now, this commit only handles the direct deletion of the specified comment.
+
+	log.Printf("Successfully deleted comment ID: %s and updated post count.", msg.CommentID)
+	context.Respond(&models.StatusResponse{Success: true, Message: "Comment deleted successfully"})
 }
+
+// deleteCommentAndChildren recursively sets IsDeleted flag on a comment and its children.
+// THIS FUNCTION NEEDS TO BE REVISITED if hard deletes are fully implemented for children.
+// Currently, it sets a model field that isn't persisted as 'is_deleted' in the DB.
 
 func (a *CommentActor) handleGetComment(context actor.Context, msg *GetCommentMsg) {
 	// Try cache first
@@ -379,9 +398,9 @@ func (a *CommentActor) handleGetComment(context actor.Context, msg *GetCommentMs
 		return
 	}
 
-	// If not in cache, try MongoDB
+	// If not in cache, try database
 	ctx := stdctx.Background()
-	comment, err := a.mongodb.GetComment(ctx, msg.CommentID)
+	comment, err := a.db.GetComment(ctx, msg.CommentID)
 	if err != nil {
 		if utils.IsErrorCode(err, utils.ErrNotFound) {
 			context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", nil))
@@ -396,109 +415,71 @@ func (a *CommentActor) handleGetComment(context actor.Context, msg *GetCommentMs
 	context.Respond(comment)
 }
 
+// handleGetPostComments retrieves comments for a post, fetching from DB if needed.
 func (a *CommentActor) handleGetPostComments(context actor.Context, msg *GetCommentsForPostMsg) {
 	ctx := stdctx.Background()
-	comments, err := a.mongodb.GetPostComments(ctx, msg.PostID)
+	log.Printf("Fetching comments for post %s, requesting user %s", msg.PostID, msg.RequestingUserID)
+
+	// Pass RequestingUserID to the database method
+	comments, err := a.db.GetPostComments(ctx, msg.PostID, msg.RequestingUserID)
 	if err != nil {
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to get post comments", err))
+		log.Printf("Error fetching comments for post %s: %v", msg.PostID, err)
+		// Check for specific error types if necessary, e.g., utils.IsErrorCode
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to fetch comments", err))
 		return
 	}
 
-	// Update cache
-	for _, comment := range comments {
-		a.comments[comment.ID] = comment
-		if _, exists := a.postComments[msg.PostID]; !exists {
-			a.postComments[msg.PostID] = make([]uuid.UUID, 0)
-		}
-		a.postComments[msg.PostID] = append(a.postComments[msg.PostID], comment.ID)
-	}
+	// Populate usernames for the comments
+	a.populateUsernames(ctx, comments)
 
+	// Update cache (optional, consider if this is the source of truth or if DB is always queried)
+	// For simplicity, we assume the DB query is the most up-to-date source for this specific request.
+	// If caching is implemented for this, ensure it handles user-specific data like CurrentUserVote correctly.
+
+	log.Printf("Fetched %d comments for post %s", len(comments), msg.PostID)
 	context.Respond(comments)
 }
 
 func (a *CommentActor) handleVoteComment(context actor.Context, msg *VoteCommentMsg) {
-	log.Printf("Processing vote for comment ID: %s by user %s", msg.CommentID, msg.UserID)
-
 	ctx := stdctx.Background()
-	retrievedComment, err := a.mongodb.GetComment(ctx, msg.CommentID)
-	if err != nil {
-		log.Printf("Error retrieving comment: %v", err)
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", err))
-		return
-	}
 
-	if retrievedComment.IsDeleted {
-		context.Respond(utils.NewAppError(utils.ErrNotFound, "Comment not found", nil))
-		return
-	}
-
-	if _, exists := a.commentVotes[msg.CommentID]; !exists {
-		a.commentVotes[msg.CommentID] = make(map[uuid.UUID]bool)
-	}
-
-	previousVote, hasVoted := a.commentVotes[msg.CommentID][msg.UserID]
-	karmaChange := 0
-
-	if hasVoted {
-		if previousVote == msg.IsUpvote {
-			context.Respond(utils.NewAppError(utils.ErrDuplicate, "Already voted", nil))
-			return
-		}
-
-		// First, reverse the previous vote
-		if previousVote {
-			retrievedComment.Upvotes--
-		} else {
-			retrievedComment.Downvotes--
-		}
-
-		// Then add the new vote
-		if msg.IsUpvote {
-			retrievedComment.Upvotes++
-			karmaChange = 2 // +1 for removing downvote, +1 for adding upvote
-		} else {
-			retrievedComment.Downvotes++
-			karmaChange = -2 // -1 for removing upvote, -1 for adding downvote
-		}
+	var direction models.VoteDirection
+	if msg.RemoveVote {
+		direction = models.VoteNone
+	} else if msg.IsUpvote {
+		direction = models.VoteUp
 	} else {
-		// New vote
-		if msg.IsUpvote {
-			retrievedComment.Upvotes++
-			karmaChange = 1
-		} else {
-			retrievedComment.Downvotes++
-			karmaChange = -1
-		}
+		direction = models.VoteDown
 	}
 
-	a.commentVotes[msg.CommentID][msg.UserID] = msg.IsUpvote
-	retrievedComment.Karma = retrievedComment.Upvotes - retrievedComment.Downvotes
-
-	// Update comment votes in MongoDB
-	if err := a.mongodb.UpdateCommentVotes(ctx, msg.CommentID, retrievedComment.Upvotes, retrievedComment.Downvotes); err != nil {
-		log.Printf("Error updating comment votes: %v", err)
-		context.Respond(utils.NewAppError(utils.ErrDatabase, "Failed to update vote", err))
+	err := a.db.RecordVote(ctx, msg.UserID, msg.CommentID, models.CommentVote, direction)
+	if err != nil {
+		log.Printf("Error recording vote for comment %s by user %s: %v", msg.CommentID, msg.UserID, err)
+		context.Respond(utils.NewAppError(utils.ErrDatabase, "failed to process comment vote", err))
 		return
 	}
 
-	// Update user karma in MongoDB
-	if karmaChange != 0 {
-		log.Printf("Updating karma for user %s by %d points", retrievedComment.AuthorID, karmaChange)
-		// Then notify the Engine about the karma change
-		if a.enginePID != nil {
-			log.Printf("Sending karma update to engine for user %s", retrievedComment.AuthorID)
-			context.Send(a.enginePID, &UpdateKarmaMsg{
-				UserID: retrievedComment.AuthorID,
-				Delta:  karmaChange,
-			})
-		} else {
-			log.Printf("Warning: enginePID is nil, cannot send karma update")
-		}
+	// Invalidate comment cache entry
+	delete(a.comments, msg.CommentID)
+
+	context.Respond(&struct{ Success bool }{Success: true})
+}
+
+// handleGetCommentCount handles requests for comment counts (from PostActor)
+func (a *CommentActor) handleGetCommentCount(context actor.Context, msg *GetCommentCountMsg) {
+	// This can be optimized. Instead of loading all comments, maybe query DB directly.
+	// For now, use the cache.
+	count := 0
+	if ids, ok := a.postComments[msg.PostID]; ok {
+		count = len(ids)
+		// We might want to filter out deleted comments if the cache holds them
+		// filteredCount := 0
+		// for _, id := range ids {
+		// 	if c, exists := a.comments[id]; exists && !c.IsDeleted {
+		// 		filteredCount++
+		// 	}
+		// }
+		// count = filteredCount
 	}
-
-	// Update the local cache
-	a.comments[msg.CommentID] = retrievedComment
-
-	log.Printf("Successfully processed vote. New karma: %d", retrievedComment.Karma)
-	context.Respond(retrievedComment)
+	context.Respond(count)
 }

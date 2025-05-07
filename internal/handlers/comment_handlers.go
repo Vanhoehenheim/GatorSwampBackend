@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"gator-swamp/internal/engine/actors"
+	"gator-swamp/internal/middleware"
 	"gator-swamp/internal/utils"
 
 	"github.com/google/uuid"
@@ -26,6 +27,14 @@ type EditCommentRequest struct {
 	Content   string `json:"content"`
 }
 
+// CommentVoteRequest represents a request to vote on a comment
+type CommentVoteRequest struct {
+	UserID     string `json:"userId"`
+	CommentID  string `json:"commentId"`
+	IsUpvote   bool   `json:"isUpvote"`
+	RemoveVote bool   `json:"removeVote,omitempty"` // Added optional field
+}
+
 // HandleComment handles comment-related operations
 func (s *Server) HandleComment() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +49,7 @@ func (s *Server) HandleComment() http.HandlerFunc {
 				return
 			}
 
-			log.Printf("Creating comment for post: %s by author: %s", req.PostID, req.AuthorID)
+			log.Printf("Creating comment for post: %s by author: %s and parent: %s", req.PostID, req.AuthorID, req.ParentID)
 
 			authorID, err := uuid.Parse(req.AuthorID)
 			if err != nil {
@@ -217,30 +226,62 @@ func (s *Server) HandleGetPostComments() http.HandlerFunc {
 			return
 		}
 
-		postID := r.URL.Query().Get("postId")
-		if postID == "" {
+		postIDStr := r.URL.Query().Get("postId")
+		if postIDStr == "" {
 			http.Error(w, "Missing post ID", http.StatusBadRequest)
 			return
 		}
 
-		pID, err := uuid.Parse(postID)
+		pID, err := uuid.Parse(postIDStr)
 		if err != nil {
 			http.Error(w, "Invalid post ID", http.StatusBadRequest)
 			return
 		}
 
+		// Extract requesting user ID from JWT token
+		var requestingUserID uuid.UUID
+		userIDFromToken, ok := r.Context().Value(middleware.UserIDKey).(uuid.UUID)
+		if ok {
+			requestingUserID = userIDFromToken
+		} else {
+			// If UserIDKey is not present or not a UUID, send uuid.Nil
+			// This allows unauthenticated users to still fetch comments, but without their vote status.
+			requestingUserID = uuid.Nil
+			log.Printf("No authenticated user found or UserIDKey is not a UUID, using uuid.Nil for requestingUserID in HandleGetPostComments")
+		}
+
 		future := s.Context.RequestFuture(s.CommentActor, &actors.GetCommentsForPostMsg{
-			PostID: pID,
+			PostID:           pID,
+			RequestingUserID: requestingUserID, // Pass the user ID
 		}, s.RequestTimeout)
 
 		result, err := future.Result()
 		if err != nil {
+			// Check if the error is an AppError and handle it specifically
+			if appErr, ok := err.(*utils.AppError); ok {
+				log.Printf("AppError fetching comments for post %s: %v", pID, appErr)
+				http.Error(w, appErr.Message, utils.AppErrorToHTTPStatus(appErr.Code))
+				return
+			}
+			// Generic error
+			log.Printf("Error fetching comments for post %s: %v", pID, err)
 			http.Error(w, "Failed to get comments", http.StatusInternalServerError)
 			return
 		}
 
+		// Check if the result itself is an AppError (e.g., from the actor logic, not just future.Result() error)
+		if appErr, ok := result.(*utils.AppError); ok {
+			log.Printf("AppError (from actor result) fetching comments for post %s: %v", pID, appErr)
+			http.Error(w, appErr.Message, utils.AppErrorToHTTPStatus(appErr.Code))
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			log.Printf("Error encoding comments response for post %s: %v", pID, err)
+			// Avoid writing another http.Error if headers already sent.
+			return
+		}
 	}
 }
 
@@ -252,20 +293,9 @@ func (s *Server) HandleCommentVote() http.HandlerFunc {
 			return
 		}
 
-		var req struct {
-			CommentID string `json:"commentId"`
-			UserID    string `json:"userId"`
-			IsUpvote  bool   `json:"isUpvote"`
-		}
-
+		var req CommentVoteRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		commentID, err := uuid.Parse(req.CommentID)
-		if err != nil {
-			http.Error(w, "Invalid comment ID", http.StatusBadRequest)
+			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
 
@@ -275,20 +305,54 @@ func (s *Server) HandleCommentVote() http.HandlerFunc {
 			return
 		}
 
-		msg := &actors.VoteCommentMsg{
-			CommentID: commentID,
-			UserID:    userID,
-			IsUpvote:  req.IsUpvote,
+		commentID, err := uuid.Parse(req.CommentID)
+		if err != nil {
+			http.Error(w, "Invalid comment ID", http.StatusBadRequest)
+			return
 		}
 
-		future := s.Context.RequestFuture(s.CommentActor, msg, s.RequestTimeout)
+		// Send the message to the CommentActor
+		future := s.Context.RequestFuture(s.CommentActor, &actors.VoteCommentMsg{
+			CommentID:  commentID,
+			UserID:     userID,
+			IsUpvote:   req.IsUpvote,
+			RemoveVote: req.RemoveVote, // Include RemoveVote
+		}, s.RequestTimeout)
+
 		result, err := future.Result()
 		if err != nil {
+			// Basic error handling for actor communication failure
+			log.Printf("Error requesting comment vote from actor: %v", err)
 			http.Error(w, "Failed to process vote", http.StatusInternalServerError)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		// Check if the result itself is an AppError from the actor
+		if appErr, ok := result.(*utils.AppError); ok {
+			var statusCode int
+			switch appErr.Code {
+			case utils.ErrNotFound:
+				statusCode = http.StatusNotFound
+			case utils.ErrDuplicate:
+				statusCode = http.StatusConflict
+			case utils.ErrDatabase:
+				statusCode = http.StatusInternalServerError
+			default:
+				statusCode = http.StatusInternalServerError
+			}
+			http.Error(w, appErr.Error(), statusCode)
+			return
+		}
+
+		// Check if the result indicates success (assuming actor responds with {Success: true})
+		if successResp, ok := result.(*struct{ Success bool }); ok && successResp.Success {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		} else {
+			// Handle unexpected result type or failure indication
+			log.Printf("Unexpected result from CommentActor vote: %T - %v", result, result)
+			http.Error(w, "Unexpected result from vote processing", http.StatusInternalServerError)
+		}
 	}
 }
